@@ -12,6 +12,9 @@ use runtime::Runtime;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
 
+#[cfg(test)]
+mod update_permissions;
+
 fn credential_key() -> Result<String, Box<dyn std::error::Error>> {
     let entry = keyring::Entry::new("dev.tradescript.ibkr-terminal", "credential-encryption")?;
     match entry.get_password() {

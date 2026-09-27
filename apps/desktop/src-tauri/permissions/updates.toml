@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-desktop-updates"
+description = "Check and install signed desktop releases from the workstation."
+commands.allow = ["check_update", "install_update"]

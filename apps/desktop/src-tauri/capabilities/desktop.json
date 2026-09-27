@@ -3,6 +3,7 @@
   "identifier": "desktop",
   "description": "Only the bundled terminal's loopback origin can use desktop commands.",
   "windows": ["main"],
+  "local": false,
   "remote": { "urls": ["http://127.0.0.1:43871"] },
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "allow-desktop-updates"]
 }

@@ -84,14 +84,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release-files
-      - run: node scripts/desktop/update-manifest.mjs release-files
-      - name: Collect unique download names
+      - run: node scripts/desktop/stage-release.mjs release-files downloads
+      - name: Create draft with stable download names
         shell: bash
         run: |
-          mkdir downloads
-          for target in darwin-aarch64 darwin-x86_64 windows-x86_64; do
-            find "release-files/$target" -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.tar.gz' -o -name '*.sig' \) -exec sh -c 'for file; do cp "$file" "downloads/'"$target"'-$(basename "$file")"; done' sh {} +
-          done
-          cp release-files/latest.json downloads/latest.json
           printf '%s' "$RELEASE_NOTES" > release-notes.txt
-          gh release create "v$RELEASE_VERSION" downloads/* --draft --title "TradeScript Terminal $RELEASE_VERSION" --notes-file release-notes.txt
+          gh release create "v$RELEASE_VERSION" downloads/* --draft --target "${{ github.sha }}" --title "TradeScript Terminal $RELEASE_VERSION" --notes-file release-notes.txt

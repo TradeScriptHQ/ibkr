@@ -48,6 +48,17 @@ with installers, signed update artifacts, and a combined `latest.json`. Test all
 publishing the draft. A public release host is required for customer downloads;
 a private source repository needs a separate public release host/publishing step.
 
+Asset staging and manifest generation share the same filename normalization.
+GitHub rewrites spaces in uploaded names, so the staged filenames must already
+match the manifest URLs. Each draft is pinned to the exact workflow revision.
+Before publishing, verify every platform URL against the uploaded asset name and
+check its signature with the configured updater public key.
+
+The terminal uses a loopback web origin, which Tauri treats as remote content.
+Its desktop capability must explicitly grant `allow-desktop-updates` to the
+`main` window at `http://127.0.0.1:43871`. Builds without this permission cannot
+check or install updates and need a one-time manual installer replacement.
+
 ## Release acceptance
 
 On clean Mac and Windows machines verify:
