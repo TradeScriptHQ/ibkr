@@ -1,0 +1,22 @@
+{
+  "name": "@ibkr-terminal/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run && node --test ../../scripts/desktop/update-manifest.test.mjs ../../scripts/desktop/fetch-doppler-secrets.test.mjs",
+    "bundle:runtime": "node ../../scripts/desktop/prepare.mjs"
+  },
+  "dependencies": {
+    "http-proxy": "1.18.1",
+    "@ibkr-terminal/service-runtime": "0.1.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.0",
+    "@types/http-proxy": "^1.17.16",
+    "esbuild": "0.28.2"
+  }
+}

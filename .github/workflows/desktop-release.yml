@@ -1,0 +1,97 @@
+name: Desktop release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (for example 0.1.0)'
+        required: true
+      notes:
+        description: 'Release notes'
+        required: true
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: darwin-aarch64
+            bundles: app,dmg
+          - os: macos-15-intel
+            target: darwin-x86_64
+            bundles: app,dmg
+          - os: windows-latest
+            target: windows-x86_64
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    environment: production
+    env:
+      TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Fetch release secrets from Doppler
+        env:
+          DOPPLER_TOKEN: ${{ secrets.IBKR_DOPPLER_API_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$DOPPLER_TOKEN"
+          doppler_file="$RUNNER_TEMP/desktop-secrets.json"
+          trap 'rm -f "$doppler_file"' EXIT
+          node scripts/desktop/fetch-doppler-secrets.mjs "$doppler_file"
+          jq -r '(.npm + .signing) | to_entries[] | "::add-mask::\(.value)"' "$doppler_file"
+          jq -r '(.npm + .signing) | to_entries[] | "\(.key)=\(.value)"' "$doppler_file" >> "$GITHUB_ENV"
+          rm -f "$doppler_file"
+      - run: npm ci
+      - run: npm run check
+      - run: npm run desktop:prepare
+      - run: npm run test:desktop:native
+      - run: node scripts/desktop/release-config.mjs
+      - name: Build installers and signed updates
+        run: npm run build --workspace=@ibkr-terminal/desktop -- --config src-tauri/tauri.release.json --bundles ${{ matrix.bundles }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            apps/desktop/src-tauri/target/release/bundle/**/*.dmg
+            apps/desktop/src-tauri/target/release/bundle/**/*.exe
+            apps/desktop/src-tauri/target/release/bundle/**/*.tar.gz
+            apps/desktop/src-tauri/target/release/bundle/**/*.sig
+          if-no-files-found: error
+  draft:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_NOTES: ${{ inputs.notes }}
+      RELEASE_BASE_URL: https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-files
+      - run: node scripts/desktop/update-manifest.mjs release-files
+      - name: Collect unique download names
+        shell: bash
+        run: |
+          mkdir downloads
+          for target in darwin-aarch64 darwin-x86_64 windows-x86_64; do
+            find "release-files/$target" -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.tar.gz' -o -name '*.sig' \) -exec sh -c 'for file; do cp "$file" "downloads/'"$target"'-$(basename "$file")"; done' sh {} +
+          done
+          cp release-files/latest.json downloads/latest.json
+          printf '%s' "$RELEASE_NOTES" > release-notes.txt
+          gh release create "v$RELEASE_VERSION" downloads/* --draft --title "TradeScript Terminal $RELEASE_VERSION" --notes-file release-notes.txt

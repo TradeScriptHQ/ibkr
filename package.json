@@ -1,0 +1,49 @@
+{
+  "name": "ibkr-trading-terminal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "npm run build:shared && npm run build --workspace=@ibkr-terminal/gateway && npm run build --workspace=@ibkr-terminal/mcp && npm run build --workspace=@ibkr-terminal/terminal",
+    "check": "npm run format:check && npm run typecheck && npm test",
+    "dev": "npm run build:shared && tsx scripts/dev.ts",
+    "dev:mock": "VITE_TRADING_MODE=mock npm run dev",
+    "format": "biome check --write .",
+    "format:check": "biome check .",
+    "test": "npm run test:e2e:guards && npm run build:shared && npm run test --workspaces --if-present",
+    "test:e2e": "playwright test --grep-invert @paper",
+    "test:e2e:mock": "playwright test --config=playwright.mock.config.ts",
+    "test:e2e:paper": "playwright test --config=playwright.paper.config.ts",
+    "test:release": "npm run check && npm run build && npm run test:e2e",
+    "tradescript:install": "tsx scripts/install-tradescript.ts",
+    "typecheck": "npm run build:shared && npm run typecheck --workspaces --if-present && npm run typecheck:e2e",
+    "test:e2e:paper:orders": "npm run test:e2e:paper -- --grep @paper",
+    "desktop:prepare": "npm run build:shared && npm run build --workspace=@ibkr-terminal/terminal && npm run bundle:runtime --workspace=@ibkr-terminal/desktop",
+    "desktop:dev": "npm run desktop:prepare && npm run dev --workspace=@ibkr-terminal/desktop",
+    "desktop:build": "npm run desktop:prepare && npm run build --workspace=@ibkr-terminal/desktop",
+    "test:e2e:desktop": "npm run build:shared && npm run build --workspace=@ibkr-terminal/terminal && playwright test --config=playwright.desktop.config.ts",
+    "test:e2e:ui": "playwright test --config=playwright.ui.config.ts",
+    "test:e2e:guards": "node --import tsx --test e2e/support/*.test.ts",
+    "typecheck:e2e": "tsc -p tsconfig.e2e.json",
+    "typecheck:source": "npm run build:shared && npm run typecheck --workspace=@ibkr-terminal/gateway && npm run typecheck --workspace=@ibkr-terminal/mcp && tsx scripts/typecheck-source.ts",
+    "check:source": "npm run format:check && npm run typecheck:source && npm test",
+    "build:shared": "npm run build --workspace=@ibkr-terminal/contracts && npm run build --workspace=@ibkr-terminal/service-runtime",
+    "test:desktop:native": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.10",
+    "@playwright/test": "^1.62.1",
+    "@types/node": "26.4.0",
+    "@types/ws": "8.18.1",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
+  }
+}

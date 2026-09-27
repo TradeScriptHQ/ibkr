@@ -1,0 +1,23 @@
+{
+  "name": "@ibkr-terminal/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ibkr-terminal/contracts": "0.1.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "ws": "8.21.3",
+    "zod": "4.4.3",
+    "@ibkr-terminal/service-runtime": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.1"
+  }
+}

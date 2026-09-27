@@ -1,0 +1,25 @@
+{
+  "name": "@ibkr-terminal/terminal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && vite build",
+    "dev": "vite --host 127.0.0.1",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ibkr-terminal/contracts": "0.1.0",
+    "@tauri-apps/api": "^2.11.1",
+    "@tradescript/pro": "npm:@tradescript/pro-developer-console-free@0.1.34",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "6.1.0",
+    "vite": "8.2.2"
+  }
+}
