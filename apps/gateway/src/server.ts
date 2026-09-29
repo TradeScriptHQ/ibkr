@@ -28,7 +28,7 @@ const CLIENT_HEADER_VALUE = 'terminal-v1'
 const MAX_SOCKET_BUFFER = 1_000_000
 
 interface GatewayServerOptions {
-  readonly licensing?: Pick<Licensing, 'activate' | 'retry' | 'snapshot' | 'config'>
+  readonly licensing?: Pick<Licensing, 'activate' | 'retry' | 'renewIfDue' | 'snapshot' | 'config'>
   readonly connections?: {
     snapshot(): ConnectionSnapshot
     switch(
@@ -360,6 +360,7 @@ export async function createGatewayServer(options: GatewayServerOptions) {
   if (options.licensing) {
     const licensing = options.licensing
     app.get('/api/v1/setup', { preHandler: requireSession }, async () => {
+      licensing.renewIfDue()
       const authorization = licensing.snapshot()
       return {
         sdk: {

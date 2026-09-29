@@ -103,4 +103,44 @@ describe('TradeScript deployment lease manager', () => {
       }
     },
   )
+
+  it('renews an overdue lease when its timer was missed, but not after a failed renewal', async () => {
+    let now = Date.now()
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        lease: 'x'.repeat(64),
+        leaseType: 'TradeScript-Deployment-Lease',
+        expiresAt: new Date(now + 60000).toISOString(),
+        expiresIn: 60,
+        renewAfter: new Date(now + 30000).toISOString(),
+        renewAfterIn: 30,
+        catalogVersion: 'fixture',
+        policy: {},
+      }),
+    )
+    const manager = new TradeScriptLeaseManager(configured(), { fetch: fetchMock, now: () => now })
+    try {
+      await manager.getLease()
+      manager.renewIfDue()
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      // The computer slept past expiry before the renewal timer fired.
+      now += 60001
+      expect(manager.snapshot()).toMatchObject({ ready: false, state: 'ready' })
+      expect(manager.snapshot()).not.toHaveProperty('failure')
+      manager.renewIfDue()
+      manager.renewIfDue()
+      expect(manager.snapshot()).toMatchObject({ ready: false, state: 'exchanging' })
+      await vi.waitFor(() =>
+        expect(manager.snapshot()).toMatchObject({ ready: true, state: 'ready' }),
+      )
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      fetchMock.mockImplementation(async () => new Response('{}', { status: 401 }))
+      now += 60001
+      await expect(manager.refresh()).rejects.toThrow('status 401')
+      manager.renewIfDue()
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+    } finally {
+      manager.stop()
+    }
+  })
 })

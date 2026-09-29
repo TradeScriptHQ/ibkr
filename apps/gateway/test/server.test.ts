@@ -54,6 +54,7 @@ it('exposes safe SDK recovery status and protects authorization retries with ses
     TRADESCRIPT_CUSTOMER_BUILD_FINGERPRINT: 'tsfp1_0123456789abcdef0123456789abcdef',
   })
   const retry = vi.fn(async () => ({ configured: true, ready: true }))
+  const renewIfDue = vi.fn()
   const app = await createGatewayServer({
     config,
     proxyCapability: browserHeaders['x-terminal-proxy-capability'],
@@ -64,6 +65,7 @@ it('exposes safe SDK recovery status and protects authorization retries with ses
     licensing: {
       config: config.tradescript,
       retry,
+      renewIfDue,
       activate: async () => ({ configured: true, ready: true }),
       snapshot: () => ({ state: 'error', ready: false, failure: 'rejected', message: 'rejected' }),
     },
@@ -89,6 +91,7 @@ it('exposes safe SDK recovery status and protects authorization retries with ses
   const headers = { ...browserHeaders, cookie: `${cookie?.name}=${cookie?.value}` }
   const response = await app.inject({ path: '/api/v1/setup', headers })
   expect(response.statusCode).toBe(200)
+  expect(renewIfDue).toHaveBeenCalledTimes(1)
   expect(response.json()).toMatchObject({
     sdk: { configured: true, ready: false, failure: 'rejected' },
   })

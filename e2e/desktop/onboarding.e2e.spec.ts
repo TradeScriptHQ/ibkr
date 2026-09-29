@@ -311,6 +311,41 @@ test('keeps a valid workstation open during a temporary renewal outage and offer
   expect(retried).toBe(true)
 })
 
+test('keeps the workstation mounted while a lease that lapsed during sleep renews', async ({
+  page,
+}) => {
+  const expiresAt = '2026-01-01T00:00:00.000Z'
+  let setup: SetupStatus = {
+    sdk: { configured: true, ready: true, state: 'ready', expiresAt },
+    connectionConfigured: true,
+  }
+  let reads = 0
+  await page.route('**/api/v1/setup', (route) => {
+    reads++
+    return route.fulfill({ json: setup })
+  })
+  await page.goto(runtimeOrigin)
+  await expect(page.getByRole('button', { name: 'SDK settings', exact: true })).toBeVisible()
+  await page.locator('.app-shell').evaluate((shell) => {
+    shell.dataset.mountMarker = 'original'
+  })
+  setup = { ...setup, sdk: { configured: true, ready: false, state: 'exchanging', expiresAt } }
+  // Polls are sequential, so a second read proves the first pending status was applied.
+  const before = reads
+  await expect.poll(() => reads, { timeout: 15000 }).toBeGreaterThanOrEqual(before + 2)
+  await expect(page.locator('.app-shell[data-mount-marker="original"]')).toHaveCount(1)
+  await expect(page.getByText('SDK authorization expired', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Restore SDK access', { exact: true })).toHaveCount(0)
+  // Recovery starts only once the renewal actually fails.
+  setup = {
+    ...setup,
+    sdk: { configured: true, ready: false, state: 'error', failure: 'unavailable', expiresAt },
+  }
+  await expect(page.getByText('SDK authorization expired', { exact: true })).toBeVisible({
+    timeout: 12000,
+  })
+})
+
 test('stops packaged services, releases their ports and reopens the workstation', async ({
   page,
 }) => {

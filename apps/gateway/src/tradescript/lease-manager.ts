@@ -91,6 +91,22 @@ export class TradeScriptLeaseManager {
     void this.refresh().catch(() => undefined)
   }
 
+  /**
+   * Starts a renewal whose timer was missed, e.g. while the computer slept. Failed
+   * exchanges keep their own backoff or wait for the user, so they are not retried here.
+   */
+  renewIfDue(): void {
+    if (
+      this.#stopped ||
+      this.#activeExchange !== undefined ||
+      this.#failure !== undefined ||
+      this.#current === undefined ||
+      Date.parse(this.#current.renewAfter) > this.#now()
+    )
+      return
+    void this.refresh().catch(() => undefined)
+  }
+
   async getLease(): Promise<TradeScriptLease> {
     if (this.#stopped) throw new Error('TradeScript lease manager is stopped')
     if (!this.#config.runtimeCredentialsConfigured) {

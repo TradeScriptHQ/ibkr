@@ -10,8 +10,13 @@ export interface SetupStatus {
   connectionConfigured: boolean
 }
 
+/** A previous lease lapsed without a failed renewal, e.g. after the computer slept. */
+export function sdkRenewalPending(sdk: SetupStatus['sdk']) {
+  return sdk.configured && !sdk.ready && !sdk.failure && sdk.expiresAt !== undefined
+}
+
 export function sdkAuthorizationNotice(sdk: SetupStatus['sdk']) {
-  if (!sdk.configured) return undefined
+  if (!sdk.configured || sdkRenewalPending(sdk)) return undefined
   if (!sdk.ready && sdk.expiresAt)
     return {
       title: 'SDK authorization expired',

@@ -24,6 +24,9 @@ export class Licensing {
   snapshot() {
     return this.#leases.snapshot()
   }
+  renewIfDue() {
+    this.#leases.renewIfDue()
+  }
   getLease() {
     return this.#leases.getLease()
   }

@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { sdkAuthorizationNotice } from './sdk-authorization.js'
+import { sdkAuthorizationNotice, sdkRenewalPending } from './sdk-authorization.js'
 
 it('does not confuse initial authorization or a network failure with rejected credentials', () => {
   expect(sdkAuthorizationNotice({ configured: false, ready: false })).toBeUndefined()
@@ -25,4 +25,22 @@ it('distinguishes rejected renewal with a valid lease from expired SDK access', 
   expect(
     sdkAuthorizationNotice({ ...sdk, ready: false, failure: 'unavailable' })?.message,
   ).toContain('internet connection')
+})
+
+it('treats a lease that lapsed without a failed renewal as renewing, not expired', () => {
+  const lapsed = {
+    configured: true,
+    ready: false,
+    state: 'ready' as const,
+    expiresAt: '2026-01-01T00:00:00.000Z',
+  }
+  expect(sdkRenewalPending(lapsed)).toBe(true)
+  expect(sdkAuthorizationNotice(lapsed)).toBeUndefined()
+  expect(sdkRenewalPending({ ...lapsed, state: 'exchanging' })).toBe(true)
+  expect(sdkRenewalPending({ ...lapsed, failure: 'unavailable' })).toBe(false)
+  expect(sdkAuthorizationNotice({ ...lapsed, failure: 'unavailable' })?.title).toBe(
+    'SDK authorization expired',
+  )
+  // Without a previous lease, initial authorization still gates setup.
+  expect(sdkRenewalPending({ configured: true, ready: false, state: 'exchanging' })).toBe(false)
 })

@@ -3,7 +3,7 @@ import { chartButtonThemeStyle } from '@tradescript/pro/sdk/theme'
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { ConnectionSettingsButton } from './connection-settings.js'
 import { LegalNotices } from './legal-notices.js'
-import { type SetupStatus, sdkAuthorizationNotice } from './sdk-authorization.js'
+import { type SetupStatus, sdkAuthorizationNotice, sdkRenewalPending } from './sdk-authorization.js'
 import { bootstrapBrowserSession, CLIENT_HEADERS } from './terminal-session.js'
 import { WORKSTATION_THEME } from './workstation-theme.js'
 
@@ -147,8 +147,11 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
     }
   }
   if (mock) return children
-  const complete = status?.sdk.configured && status.sdk.ready && status.connectionConfigured
-  const recovery = status?.sdk.configured && !status.sdk.ready
+  // A pending renewal keeps the workstation open; recovery starts only once it fails.
+  const renewing = status !== undefined && sdkRenewalPending(status.sdk)
+  const complete =
+    status?.sdk.configured && (status.sdk.ready || renewing) && status.connectionConfigured
+  const recovery = status?.sdk.configured && !status.sdk.ready && !renewing
   const notice = status && sdkAuthorizationNotice(status.sdk)
   const content = (
     <div className="setup-content">
@@ -168,7 +171,7 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
           </button>
         </div>
       )}
-      {recovery && !notice && <p role="status">Checking SDK authorization…</p>}
+      {(renewing || (recovery && !notice)) && <p role="status">Checking SDK authorization…</p>}
       <div className="setup-step">
         <span>01</span>
         <div>

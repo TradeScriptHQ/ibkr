@@ -45,10 +45,12 @@ owned local services, never TWS and never broker orders.
 ## Recover SDK access
 
 The app checks SDK authorization every five seconds and when its window regains
-focus. If renewal is rejected while the current authorization is still valid, a
+focus. A check also starts any renewal whose timer was missed, for example while
+the computer slept; the workstation stays open while that renewal is in progress.
+If renewal is rejected while the current authorization is still valid, a
 notice offers **Update SDK credentials** without closing the workstation. Once
-authorization expires, the app shows **Restore SDK access** with replacement
-fields, including when TWS setup has not been completed.
+authorization expires after a failed renewal, the app shows **Restore SDK access**
+with replacement fields, including when TWS setup has not been completed.
 
 Use new runtime credentials from Developer Console, or choose **Retry authorization**
 after renewing a licence or restoring connectivity. Network failures are shown
