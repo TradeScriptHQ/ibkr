@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+  width="64" height="64" viewBox="307 300 640 640" role="img" aria-labelledby="logo-title logo-desc">
+  <title id="logo-title">Folded ribbon logo</title>
+  <desc id="logo-desc">A white, symmetrical folded-ribbon mark with softly shaded folds. Reconstructed as editable vector paths and gradients.</desc>
+  <defs>
+    <linearGradient id="bridge-light" gradientUnits="userSpaceOnUse" x1="627" y1="380" x2="627" y2="478">
+      <stop offset="0" stop-color="#f7f7f7"/>
+      <stop offset="1" stop-color="#fdfdfd"/>
+    </linearGradient>
+    <radialGradient id="front-light" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="1"
+      gradientTransform="matrix(490.7099 0 223.1495 357.8169 382.2591 392.1051)">
+      <stop offset="0.000000" stop-color="#0a0a0a"/>
+      <stop offset="0.035714" stop-color="#0d0d0d"/>
+      <stop offset="0.071429" stop-color="#151515"/>
+      <stop offset="0.107143" stop-color="#222222"/>
+      <stop offset="0.142857" stop-color="#333333"/>
+      <stop offset="0.178571" stop-color="#474747"/>
+      <stop offset="0.214286" stop-color="#5d5d5d"/>
+      <stop offset="0.250000" stop-color="#737373"/>
+      <stop offset="0.285714" stop-color="#898989"/>
+      <stop offset="0.321429" stop-color="#9e9e9e"/>
+      <stop offset="0.357143" stop-color="#b1b1b1"/>
+      <stop offset="0.392857" stop-color="#c2c2c2"/>
+      <stop offset="0.428571" stop-color="#d0d0d0"/>
+      <stop offset="0.464286" stop-color="#dcdcdc"/>
+      <stop offset="0.500000" stop-color="#e5e5e5"/>
+      <stop offset="0.535714" stop-color="#ececec"/>
+      <stop offset="0.571429" stop-color="#f2f2f2"/>
+      <stop offset="0.607143" stop-color="#f6f6f6"/>
+      <stop offset="0.642857" stop-color="#f9f9f9"/>
+      <stop offset="0.678571" stop-color="#fbfbfb"/>
+      <stop offset="0.714286" stop-color="#fdfdfd"/>
+      <stop offset="0.750000" stop-color="#fdfdfd"/>
+      <stop offset="0.785714" stop-color="#fefefe"/>
+      <stop offset="0.821429" stop-color="#fefefe"/>
+      <stop offset="0.857143" stop-color="#ffffff"/>
+      <stop offset="0.892857" stop-color="#ffffff"/>
+      <stop offset="0.928571" stop-color="#ffffff"/>
+      <stop offset="0.964286" stop-color="#ffffff"/>
+      <stop offset="1.000000" stop-color="#ffffff"/>
+    </radialGradient>
+    <radialGradient id="tail-light" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="1"
+      gradientTransform="matrix(372.8314 0 169.5990 475.8470 524.1468 513.5419)">
+      <stop offset="0.000000" stop-color="#0a0a0a"/>
+      <stop offset="0.035714" stop-color="#0d0d0d"/>
+      <stop offset="0.071429" stop-color="#151515"/>
+      <stop offset="0.107143" stop-color="#222222"/>
+      <stop offset="0.142857" stop-color="#333333"/>
+      <stop offset="0.178571" stop-color="#474747"/>
+      <stop offset="0.214286" stop-color="#5d5d5d"/>
+      <stop offset="0.250000" stop-color="#737373"/>
+      <stop offset="0.285714" stop-color="#898989"/>
+      <stop offset="0.321429" stop-color="#9e9e9e"/>
+      <stop offset="0.357143" stop-color="#b1b1b1"/>
+      <stop offset="0.392857" stop-color="#c2c2c2"/>
+      <stop offset="0.428571" stop-color="#d0d0d0"/>
+      <stop offset="0.464286" stop-color="#dcdcdc"/>
+      <stop offset="0.500000" stop-color="#e5e5e5"/>
+      <stop offset="0.535714" stop-color="#ececec"/>
+      <stop offset="0.571429" stop-color="#f2f2f2"/>
+      <stop offset="0.607143" stop-color="#f6f6f6"/>
+      <stop offset="0.642857" stop-color="#f9f9f9"/>
+      <stop offset="0.678571" stop-color="#fbfbfb"/>
+      <stop offset="0.714286" stop-color="#fdfdfd"/>
+      <stop offset="0.750000" stop-color="#fdfdfd"/>
+      <stop offset="0.785714" stop-color="#fefefe"/>
+      <stop offset="0.821429" stop-color="#fefefe"/>
+      <stop offset="0.857143" stop-color="#ffffff"/>
+      <stop offset="0.892857" stop-color="#ffffff"/>
+      <stop offset="0.928571" stop-color="#ffffff"/>
+      <stop offset="0.964286" stop-color="#ffffff"/>
+      <stop offset="1.000000" stop-color="#ffffff"/>
+    </radialGradient>
+    <g id="left-fold">
+      <path id="left-hanging-end" fill="url(#tail-light)" d="M 465.9 605.1
+L 608.5 625
+V 855.9
+C 608.5 860.9 606.7 863 602.9 860.1
+L 489.5 772
+C 473.8 759.9 465.9 748 465.9 731.3
+Z"/>
+      <path id="left-ribbon-face" fill="url(#front-light)" d="M 339 476.4
+H 461.6
+C 485.1 476.4 510.3 501 537.6 524
+L 578.1 559.8
+C 598.2 578.8 608.5 601 608.5 627.3
+V 738
+C 608.5 708.3 570.9 683.6 534.6 657.4
+L 367.1 540.9
+C 338.6 520.1 319.5 503.7 319.5 488.8
+C 319.5 480.5 327.3 476.4 339 476.4 Z"/>
+    </g>
+  </defs>
+  <g id="ribbon-mark">
+    <path id="top-bridge" fill="url(#bridge-light)" d="M 433 379.8
+H 821
+C 836.4 379.8 844.7 386.2 854.8 397.1
+L 927.8 475.4
+C 932.5 480.4 934.5 484.8 934.5 489.1
+C 933.1 480.9 925.5 476.4 915 476.4
+H 339
+C 328.5 476.4 320.9 480.9 319.5 489.1
+C 319.5 484.8 321.5 480.4 326.2 475.4
+L 399.2 397.1
+C 409.3 386.2 417.6 379.8 433 379.8 Z"/>
+    <use id="left-side" xlink:href="#left-fold"/>
+    <use id="right-side" xlink:href="#left-fold" transform="translate(1254 0) scale(-1 1)"/>
+  </g>
+</svg>

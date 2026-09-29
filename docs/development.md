@@ -48,6 +48,13 @@ Do not stop user processes or touch unrelated broker orders during development.
 
 ## Structure and checks
 
+Brand artwork comes from TradeMind's `branding/tradescript-logo.svg`. The terminal's
+`public/tradescript-mark.svg` and `public/favicon.svg` use that repository's generated
+website assets. Desktop `icons/app-icon.svg` uses its generated native icon framing;
+only the outer accessibility title is added here. Preserve the original paths and
+gradients. Regenerate desktop PNG, ICNS and ICO files with Tauri's `icon` command
+from that SVG, copying only the desktop outputs into `apps/desktop/src-tauri/icons`.
+
 Keep shared wire schemas in `packages/contracts`, service lifecycle code in
 `packages/service-runtime`, and application-specific behavior in its owning app.
 Small domain modules are preferable to moving asynchronous state between unrelated
