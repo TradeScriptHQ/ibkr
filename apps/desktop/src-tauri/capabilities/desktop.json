@@ -5,5 +5,12 @@
   "windows": ["main"],
   "local": false,
   "remote": { "urls": ["http://127.0.0.1:43871"] },
-  "permissions": ["core:default", "allow-desktop-updates"]
+  "permissions": [
+    "core:default",
+    "allow-desktop-updates",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
+  ]
 }

@@ -155,7 +155,7 @@ fn main() {
                 return Err("Unexpected local service address".into());
             }
             app.manage(runtime);
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse()?))
+            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse()?))
                 .title("TradeScript Terminal")
                 .inner_size(1440.0, 960.0)
                 .min_inner_size(900.0, 600.0)
@@ -163,8 +163,22 @@ fn main() {
                     url.scheme() == "http"
                         && url.host_str() == Some("127.0.0.1")
                         && url.port() == Some(43871)
-                })
-                .build()?;
+                });
+            #[cfg(target_os = "macos")]
+            let window = window
+                .transparent(true)
+                .theme(Some(tauri::Theme::Dark))
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true)
+                .traffic_light_position(tauri::LogicalPosition::new(18.0, 22.0))
+                .effects(tauri::utils::config::WindowEffectsConfig {
+                    effects: vec![tauri::utils::WindowEffect::HudWindow],
+                    state: Some(tauri::utils::WindowEffectState::Active),
+                    ..Default::default()
+                });
+            #[cfg(windows)]
+            let window = window.decorations(false);
+            window.build()?;
             Ok(())
         })
         .build(tauri::generate_context!())

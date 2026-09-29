@@ -4,7 +4,7 @@ export const WORKSTATION_THEME: ChartTheme = {
   base: 'dark',
   name: 'TradeScript Liquid Glass',
   colors: {
-    background: '#07111b',
+    background: 'rgba(7, 17, 27, 0.22)',
     gridHorizontal: 'rgba(120, 157, 193, 0.075)',
     gridVertical: 'rgba(120, 157, 193, 0.052)',
     gridVerticalMinor: 'rgba(120, 157, 193, 0.028)',
@@ -20,13 +20,13 @@ export const WORKSTATION_THEME: ChartTheme = {
     crosshairLabelBackground: '#316caa',
     axisLineColor: 'rgba(125, 158, 193, 0.13)',
     axisTextColor: '#8293a8',
-    axisBackgroundColor: '#07111b',
+    axisBackgroundColor: 'rgba(7, 17, 27, 0.35)',
     paneSeparatorColor: 'rgba(125, 158, 193, 0.13)',
   },
   ui: {
     surface: {
-      background: 'rgba(9, 20, 31, 0.94)',
-      shellBackground: '#07111b',
+      background: 'rgba(16, 25, 36, 0.52)',
+      shellBackground: 'transparent',
       border: 'rgba(142, 172, 202, 0.2)',
       borderRadius: '7px',
       text: '#dbe7f4',
@@ -81,7 +81,7 @@ export const WORKSTATION_THEME: ChartTheme = {
     },
     modal: {
       backdrop: 'rgba(1, 6, 12, 0.7)',
-      background: 'rgba(11, 24, 36, 0.97)',
+      background: 'rgba(19, 29, 42, 0.9)',
       border: 'rgba(142, 172, 202, 0.22)',
       shadow: '0 28px 80px rgba(0, 0, 0, 0.58)',
       text: '#dce7f5',
@@ -168,7 +168,7 @@ export const WORKSTATION_THEME: ChartTheme = {
     },
     typography: {
       fontFamily:
-        'Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif',
+        '-apple-system, BlinkMacSystemFont, Inter, ui-sans-serif, "SF Pro Text", "Segoe UI", sans-serif',
       monoFontFamily: '"SF Mono", "Roboto Mono", ui-monospace, monospace',
       fontSize: '12px',
       fontWeight: '450',
@@ -177,7 +177,7 @@ export const WORKSTATION_THEME: ChartTheme = {
       favoriteSweep: 'none',
       selectionCardSheen: 'none',
       drawingSidebarOverflowBorder: 'rgba(142, 172, 202, 0.13)',
-      drawingSidebarOverflowBackground: '#091520',
+      drawingSidebarOverflowBackground: 'rgba(9, 21, 32, 0.88)',
       drawingSidebarOverflowHoverBackground: '#102333',
     },
   },

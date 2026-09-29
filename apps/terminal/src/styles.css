@@ -1,8 +1,11 @@
 :root {
   color: #e7eef8;
-  background: #040a10;
+  --desktop-titlebar-height: 0px;
+  --app-height: calc(100dvh - var(--desktop-titlebar-height));
+  background: #0c1522;
+  color-scheme: dark;
   font-family:
-    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+    -apple-system, BlinkMacSystemFont, Inter, ui-sans-serif, "SF Pro Display", "Segoe UI",
     sans-serif;
   font-synthesis: none;
 }
@@ -28,11 +31,11 @@ input {
 }
 
 .app-shell {
-  min-height: 100vh;
+  min-height: var(--app-height);
   background:
     radial-gradient(ellipse at 50% -18%, rgb(73 137 195 / 17%), transparent 46rem),
     radial-gradient(circle at 8% 72%, rgb(29 82 122 / 7%), transparent 38rem),
-    linear-gradient(180deg, #07111a 0%, #040a10 100%);
+    linear-gradient(180deg, rgb(16 26 40 / 18%), rgb(5 12 22 / 24%));
 }
 
 .topbar {
@@ -44,8 +47,8 @@ input {
   justify-content: space-between;
   gap: 20px;
   padding: 0 16px;
-  border-bottom: 1px solid #223342;
-  background: linear-gradient(180deg, #0c1924, #09131d);
+  border-bottom: 1px solid rgb(220 234 255 / 10%);
+  background: linear-gradient(180deg, rgb(53 67 84 / 24%), rgb(16 27 42 / 20%));
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 3%);
 }
 .brand-lockup {
@@ -55,17 +58,11 @@ input {
   flex-shrink: 0;
 }
 .brand-mark {
-  display: grid;
+  display: block;
   width: 29px;
   height: 29px;
-  place-items: center;
-  border: 1px solid #35536c;
-  border-radius: 7px;
-  background: linear-gradient(145deg, #173247, #0c1c29);
-  color: #aed5f4;
-  font-size: 10px;
-  font-weight: 750;
-  letter-spacing: 0.05em;
+  flex-shrink: 0;
+  object-fit: contain;
 }
 .brand-lockup div {
   display: grid;
@@ -152,10 +149,11 @@ input {
 
 .terminal-frame {
   position: relative;
-  height: calc(100vh - 54px);
+  height: calc(var(--app-height) - 54px);
   min-height: 0;
   overflow: hidden;
-  background: radial-gradient(ellipse at 50% 0%, rgb(47 105 157 / 8%), transparent 42rem), #050c13;
+  background:
+    radial-gradient(ellipse at 50% 0%, rgb(47 105 157 / 8%), transparent 42rem), transparent;
 }
 
 .terminal-host {
@@ -324,7 +322,7 @@ input {
 }
 
 .terminal-host .ts-widget-layout-theme .dv-groupview {
-  background: linear-gradient(155deg, rgb(18 35 51 / 76%), rgb(7 18 28 / 88%));
+  background: linear-gradient(155deg, rgb(47 62 80 / 18%), rgb(7 18 28 / 24%));
   box-shadow:
     0 14px 34px rgb(0 3 8 / 18%),
     inset 0 1px 0 rgb(255 255 255 / 3%);
@@ -411,7 +409,7 @@ input {
 .workspace-frame {
   position: relative;
   display: grid;
-  min-height: calc(100vh - 58px);
+  min-height: calc(var(--app-height) - 58px);
   place-items: center;
   padding: 36px 22px;
   isolation: isolate;
@@ -861,45 +859,58 @@ h1 {
 }
 
 .setup-page {
-  min-height: 100dvh;
-  display: grid;
-  place-items: center;
+  height: var(--app-height);
+  display: flex;
+  flex-direction: column;
   padding: 32px 20px;
-  background: var(--background, #08131d);
+  background: radial-gradient(ellipse at 50% 0%, rgb(137 169 225 / 10%), transparent 65%);
   color: #d6e3ee;
   overflow-y: auto;
 }
 .setup-card {
-  width: min(100%, 580px);
-  padding: 28px;
-  border: 1px solid #294354;
-  border-radius: 14px;
-  background: #0d1d29;
-  box-shadow: 0 20px 70px #0005;
+  width: min(100%, 600px);
+  flex-shrink: 0;
+  margin: auto;
+  padding: 36px;
+  border: 1px solid rgb(230 241 255 / 19%);
+  border-radius: 26px;
+  background: linear-gradient(145deg, rgb(43 56 74 / 72%), rgb(24 36 52 / 78%));
+  box-shadow:
+    0 28px 80px rgb(0 0 0 / 24%),
+    inset 0 1px 0 rgb(255 255 255 / 12%);
+  -webkit-backdrop-filter: blur(36px) saturate(1.3);
+  backdrop-filter: blur(36px) saturate(1.3);
 }
 .setup-content {
   font-size: 13px;
   line-height: 1.6;
 }
 .setup-content p {
-  color: #91a8b9;
-  margin: 5px 0 12px;
+  color: #aab9cb;
+  margin: 7px 0 14px;
 }
 .setup-heading {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-bottom: 24px;
+  gap: 18px;
+  margin-bottom: 28px;
 }
 .setup-heading strong {
-  font-size: 20px;
+  font-size: 25px;
+  letter-spacing: -0.035em;
+  color: #f3f6fc;
+}
+.setup-heading .brand-mark {
+  width: 54px;
+  height: 54px;
+  filter: drop-shadow(0 4px 10px rgb(0 0 0 / 20%));
 }
 .setup-step {
   display: flex;
   gap: 14px;
   margin-top: 22px;
   padding-top: 18px;
-  border-top: 1px solid #233747;
+  border-top: 1px solid rgb(221 235 255 / 12%);
 }
 .setup-step > span {
   color: #70b3e8;
@@ -912,6 +923,26 @@ h1 {
 .setup-content .setup-success {
   color: #6cddb3;
 }
+.setup-authorization-notice,
+.sdk-authorization-notice {
+  padding: 16px;
+  border: 1px solid #82653b;
+  border-radius: 10px;
+  background: #262219;
+  color: #f1d7a7;
+}
+.sdk-authorization-notice {
+  position: fixed;
+  top: calc(var(--desktop-titlebar-height) + 64px);
+  right: 16px;
+  z-index: 90;
+  width: min(380px, calc(100vw - 32px));
+  font-size: 13px;
+  box-shadow: 0 8px 32px #0005;
+}
+.sdk-authorization-notice p {
+  margin: 8px 0 12px;
+}
 .setup-content .setup-legal {
   font-size: 11px;
   margin-top: 24px;
@@ -920,11 +951,14 @@ h1 {
   color: #ff929b;
 }
 .setup-primary {
-  padding: 9px 14px;
-  background: #1c4c68;
-  border: 1px solid #39799f;
+  padding: 10px 18px;
+  background: linear-gradient(180deg, #438eee, #2868cd);
+  border: 1px solid rgb(174 211 255 / 35%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 18%),
+    0 4px 12px rgb(0 33 89 / 18%);
   color: #e1f1ff;
-  border-radius: 6px;
+  border-radius: 10px;
   cursor: pointer;
 }
 .setup-primary:disabled {
@@ -976,4 +1010,124 @@ h1 {
   border: 1px solid #365368;
   border-radius: 8px;
   box-shadow: 0 10px 30px #0008;
+}
+
+/* A charcoal tint softens the native vibrancy without hiding the desktop material. */
+:root[data-desktop] {
+  --desktop-titlebar-height: 48px;
+}
+:root[data-desktop="mac"] {
+  background: rgb(12 21 34 / 52%);
+}
+.desktop-titlebar {
+  height: var(--desktop-titlebar-height);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  user-select: none;
+  -webkit-user-select: none;
+  border-bottom: 1px solid rgb(235 244 255 / 9%);
+  background: linear-gradient(180deg, rgb(207 225 255 / 9%), rgb(116 139 171 / 3%));
+}
+.desktop-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #e5eaf2;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.desktop-title img {
+  width: 20px;
+  height: 20px;
+  pointer-events: none;
+}
+.desktop-title > span {
+  color: #a9b5c5;
+  font-weight: 400;
+}
+.desktop-content {
+  height: var(--app-height);
+  overflow: hidden;
+}
+.desktop-window-controls {
+  position: absolute;
+  right: 0;
+  top: 0;
+  height: 100%;
+  display: flex;
+}
+.desktop-window-controls button {
+  width: 46px;
+  border: 0;
+  background: transparent;
+  color: #dce6f5;
+  font-size: 18px;
+}
+.desktop-window-controls button:hover {
+  background: rgb(255 255 255 / 12%);
+}
+.desktop-window-controls button:last-child:hover {
+  background: #c42b38;
+}
+.setup-content .connection-form {
+  padding: 18px 0 4px 34px;
+}
+.setup-content .connection-form label {
+  color: #c0cbd9;
+  font-size: 12px;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.setup-content .connection-form input {
+  height: 40px;
+  border-radius: 9px;
+  border: 1px solid rgb(222 236 255 / 17%);
+  background: rgb(4 12 24 / 24%);
+  box-shadow: inset 0 1px 3px rgb(0 0 0 / 10%);
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.setup-content > button,
+.setup-authorization-notice button,
+.sdk-authorization-notice button {
+  border: 1px solid rgb(221 235 255 / 20%);
+  border-radius: 8px;
+  background: rgb(230 239 255 / 8%);
+  color: #e6edf8;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.setup-content button:focus-visible,
+.desktop-window-controls button:focus-visible {
+  outline: 2px solid #91c1ff;
+  outline-offset: 3px;
+}
+.setup-content button:hover:not(:disabled) {
+  filter: brightness(1.15);
+}
+@media (max-width: 640px) {
+  .setup-card {
+    padding: 24px;
+    border-radius: 20px;
+  }
+  .setup-heading strong {
+    font-size: 21px;
+  }
+  .setup-content .connection-form {
+    padding-left: 0;
+  }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  :root[data-desktop="mac"] {
+    background: #101b29;
+  }
+  .setup-card {
+    background: #182535;
+  }
+  .app-shell {
+    background: #0c1724;
+  }
 }

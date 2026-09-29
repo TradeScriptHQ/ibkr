@@ -27,6 +27,21 @@ export class Licensing {
   getLease() {
     return this.#leases.getLease()
   }
+  async retry() {
+    if (this.#saving) throw new RequestError(409, 'SDK activation is already in progress.')
+    this.#saving = true
+    try {
+      await this.#leases.refresh()
+      return { configured: true, ready: true }
+    } catch {
+      throw new RequestError(
+        400,
+        'SDK authorization is still unavailable. Check your internet connection, credentials and licence, then try again.',
+      )
+    } finally {
+      this.#saving = false
+    }
+  }
   start() {
     this.#leases.start()
   }

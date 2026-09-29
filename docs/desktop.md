@@ -42,6 +42,23 @@ restoring it or resetting credentials; do not silently replace an existing key.
 Workspace webview storage persists at the stable origin. Closing the window stops
 owned local services, never TWS and never broker orders.
 
+## Recover SDK access
+
+The app checks SDK authorization every five seconds and when its window regains
+focus. If renewal is rejected while the current authorization is still valid, a
+notice offers **Update SDK credentials** without closing the workstation. Once
+authorization expires, the app shows **Restore SDK access** with replacement
+fields, including when TWS setup has not been completed.
+
+Use new runtime credentials from Developer Console, or choose **Retry authorization**
+after renewing a licence or restoring connectivity. Network failures are shown
+separately from rejected credentials. Replacement credentials are validated before
+the encrypted saved credentials are overwritten; a failed attempt preserves the
+existing credentials. Success reloads an already-configured workstation. TWS profiles
+and saved workspace data are retained; this flow does not cancel broker orders.
+If the local session itself has expired, **Reload workstation** starts a fresh local
+session and returns to credential recovery without deleting saved settings.
+
 ## Runtime ownership
 
 The Rust host owns one Node child. The Node runtime owns the authenticated proxy and
@@ -53,3 +70,9 @@ See [architecture](architecture.md) for owners, [testing](testing.md) for automa
 checks, and [releases](releases.md) for platform signing, updater keys, publication
 and clean-machine acceptance. The loopback browser E2E is separate from verifying
 the native window and installed application.
+
+### Window appearance
+
+The macOS app uses native behind-window vibrancy and an overlay title bar with the system window controls. The web view, workstation shell, and chart theme use translucent surfaces so the desktop material remains visible throughout the app. Dialogs retain stronger contrast for readability. Reduced transparency and increased contrast preferences use an opaque background.
+
+Windows uses the custom title bar with minimize, maximize/restore, and close controls, with an opaque dark fallback. Browser sessions retain their normal browser chrome. Window commands are restricted to the main window at the bundled loopback origin.

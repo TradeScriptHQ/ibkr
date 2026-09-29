@@ -57,9 +57,7 @@ export function App() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-lockup">
-          <span className="brand-mark" aria-hidden="true">
-            TS
-          </span>
+          <img className="brand-mark" src="/tradescript-mark.svg" alt="" />
           <div>
             <strong>TradeScript</strong>
             <span>{MOCK_MODE ? 'Simulated Workstation' : 'IBKR Workstation'}</span>

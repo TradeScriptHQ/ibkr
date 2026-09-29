@@ -57,7 +57,50 @@ describe('TradeScript deployment lease manager', () => {
       fetch: vi.fn<typeof fetch>(async () => new Response('{}', { status: 401 })),
     })
     await expect(manager.getLease()).rejects.toThrow(/status 401/u)
-    expect(manager.snapshot()).toMatchObject({ state: 'error', ready: false })
+    expect(manager.snapshot()).toMatchObject({ state: 'error', ready: false, failure: 'rejected' })
     manager.stop()
   })
+
+  it.each([401, 403, 503])(
+    'preserves the current lease until expiry after renewal returns %i, and recovers',
+    async (status) => {
+      let now = Date.now()
+      const valid = () =>
+        Response.json({
+          lease: 'x'.repeat(64),
+          leaseType: 'TradeScript-Deployment-Lease',
+          expiresAt: new Date(now + 60000).toISOString(),
+          expiresIn: 60,
+          renewAfter: new Date(now + 30000).toISOString(),
+          renewAfterIn: 30,
+          catalogVersion: 'fixture',
+          policy: {},
+        })
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockImplementationOnce(async () => valid())
+        .mockImplementationOnce(async () => new Response('{}', { status }))
+        .mockImplementation(async () => valid())
+      const manager = new TradeScriptLeaseManager(configured(), {
+        fetch: fetchMock,
+        now: () => now,
+      })
+      try {
+        await manager.getLease()
+        await expect(manager.refresh()).rejects.toThrow(`status ${status}`)
+        expect(manager.snapshot()).toMatchObject({
+          ready: true,
+          state: 'degraded',
+          failure: status === 503 ? 'unavailable' : 'rejected',
+        })
+        now += 60001
+        expect(manager.snapshot().ready).toBe(false)
+        await manager.refresh()
+        expect(manager.snapshot()).toMatchObject({ ready: true, state: 'ready' })
+        expect(manager.snapshot()).not.toHaveProperty('failure')
+      } finally {
+        manager.stop()
+      }
+    },
+  )
 })

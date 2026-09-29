@@ -82,4 +82,63 @@ describe('local SDK credentials', () => {
     expect(licensing.snapshot().ready).toBe(true)
     licensing.stop()
   })
+
+  it('recovers saved rejected credentials by retrying or replacing them without overwriting on failure', async () => {
+    const store = new CredentialStore(join(directory(), 'credentials.json'), randomBytes(32))
+    store.write(credentials)
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => new Response('{}', { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const licensing = new Licensing(
+      {
+        packageName: 'fixture',
+        runtimeCredentialsConfigured: false,
+        sdkVersion: '0.1.34',
+        customerBuildFingerprint: 'fixture',
+        credentialExchangeUrl: 'https://example.test/lease',
+        requestedOrigin: 'http://127.0.0.1:43871',
+      },
+      store,
+    )
+    const valid = async () => {
+      const now = Date.now()
+      return Response.json({
+        lease: 'x'.repeat(64),
+        leaseType: 'TradeScript-Deployment-Lease',
+        expiresAt: new Date(now + 60000).toISOString(),
+        expiresIn: 60,
+        renewAfter: new Date(now + 30000).toISOString(),
+        renewAfterIn: 30,
+        catalogVersion: 'fixture',
+        policy: {},
+      })
+    }
+    try {
+      await expect(licensing.getLease()).rejects.toThrow('status 401')
+      expect(licensing.snapshot()).toMatchObject({ ready: false, failure: 'rejected' })
+      await expect(licensing.retry()).rejects.toThrow('still unavailable')
+      await expect(licensing.activate({ ...credentials, credentialSecret: 'bad' })).rejects.toThrow(
+        'activation failed',
+      )
+      expect(store.read()).toEqual(credentials)
+      fetchMock.mockImplementation(valid)
+      await licensing.retry()
+      expect(licensing.snapshot().ready).toBe(true)
+      expect(store.read()).toEqual(credentials)
+      fetchMock.mockImplementation(async () => new Response('{}', { status: 403 }))
+      await expect(licensing.retry()).rejects.toThrow('still unavailable')
+      fetchMock.mockImplementation(valid)
+      const replacement = { credentialId: 'replacement', credentialSecret: 'replacement-secret' }
+      await licensing.activate(replacement)
+      expect(store.read()).toEqual(replacement)
+      expect(licensing.snapshot()).toMatchObject({ ready: true, state: 'ready' })
+      expect(licensing.snapshot()).not.toHaveProperty('failure')
+      expect(fetchMock.mock.calls.at(-1)?.[1]?.headers).toMatchObject({
+        authorization: `Basic ${Buffer.from(`${replacement.credentialId}:${replacement.credentialSecret}`).toString('base64')}`,
+      })
+    } finally {
+      licensing.stop()
+    }
+  })
 })

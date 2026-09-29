@@ -104,9 +104,9 @@ export function applyChartAppearance(
   const customization = widget.customization()
   const background = {
     type: 'vertical-gradient' as const,
-    color: '#07111b',
-    gradientStartColor: '#0a1a29',
-    gradientEndColor: '#050c13',
+    color: 'rgba(7, 17, 27, 0.22)',
+    gradientStartColor: 'rgba(10, 26, 41, 0.22)',
+    gradientEndColor: 'rgba(5, 12, 19, 0.3)',
   }
   const grid = {
     show: true,

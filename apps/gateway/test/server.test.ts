@@ -1,5 +1,5 @@
 import type { SystemStatusResponse } from '@ibkr-terminal/contracts'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { loadGatewayConfig } from '../src/config.js'
 import { EventStream } from '../src/events/event-stream.js'
 import { SessionStore } from '../src/security/session-store.js'
@@ -44,6 +44,73 @@ const browserHeaders = {
   'x-terminal-proxy-capability': 'proxy-capability-with-at-least-256-bits-of-entropy',
   'x-tradescript-client': 'terminal-v1',
 }
+
+it('exposes safe SDK recovery status and protects authorization retries with session and CSRF checks', async () => {
+  const config = loadGatewayConfig({
+    NODE_ENV: 'test',
+    TRADESCRIPT_CREDENTIAL_ID: 'private-id-fixture',
+    TRADESCRIPT_CREDENTIAL_SECRET: 'private-secret-fixture',
+    TRADESCRIPT_SDK_VERSION: '0.1.34',
+    TRADESCRIPT_CUSTOMER_BUILD_FINGERPRINT: 'tsfp1_0123456789abcdef0123456789abcdef',
+  })
+  const retry = vi.fn(async () => ({ configured: true, ready: true }))
+  const app = await createGatewayServer({
+    config,
+    proxyCapability: browserHeaders['x-terminal-proxy-capability'],
+    sessions: new SessionStore(),
+    tickets: new WebSocketTicketStore(),
+    events: new EventStream(),
+    getStatus: status,
+    licensing: {
+      config: config.tradescript,
+      retry,
+      activate: async () => ({ configured: true, ready: true }),
+      snapshot: () => ({ state: 'error', ready: false, failure: 'rejected', message: 'rejected' }),
+    },
+  })
+  apps.push(app)
+  expect(
+    (
+      await app.inject({
+        method: 'POST',
+        path: '/api/v1/setup/sdk/retry',
+        headers: browserHeaders,
+        payload: {},
+      })
+    ).statusCode,
+  ).toBe(401)
+  const bootstrap = await app.inject({
+    method: 'POST',
+    path: '/api/v1/session/bootstrap',
+    headers: browserHeaders,
+    payload: {},
+  })
+  const cookie = bootstrap.cookies[0]
+  const headers = { ...browserHeaders, cookie: `${cookie?.name}=${cookie?.value}` }
+  const response = await app.inject({ path: '/api/v1/setup', headers })
+  expect(response.statusCode).toBe(200)
+  expect(response.json()).toMatchObject({
+    sdk: { configured: true, ready: false, failure: 'rejected' },
+  })
+  expect(response.body).not.toContain('private-id-fixture')
+  expect(response.body).not.toContain('private-secret-fixture')
+  expect(
+    (await app.inject({ method: 'POST', path: '/api/v1/setup/sdk/retry', headers, payload: {} }))
+      .statusCode,
+  ).toBe(403)
+  expect(retry).not.toHaveBeenCalled()
+  expect(
+    (
+      await app.inject({
+        method: 'POST',
+        path: '/api/v1/setup/sdk/retry',
+        headers: { ...headers, 'x-tradescript-csrf': bootstrap.json().csrfToken },
+        payload: {},
+      })
+    ).statusCode,
+  ).toBe(200)
+  expect(retry).toHaveBeenCalledTimes(1)
+})
 
 describe('gateway HTTP boundary', () => {
   it('exposes only a minimal direct liveness probe', async () => {

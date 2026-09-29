@@ -28,7 +28,7 @@ const CLIENT_HEADER_VALUE = 'terminal-v1'
 const MAX_SOCKET_BUFFER = 1_000_000
 
 interface GatewayServerOptions {
-  readonly licensing?: Pick<Licensing, 'activate' | 'snapshot' | 'config'>
+  readonly licensing?: Pick<Licensing, 'activate' | 'retry' | 'snapshot' | 'config'>
   readonly connections?: {
     snapshot(): ConnectionSnapshot
     switch(
@@ -359,16 +359,25 @@ export async function createGatewayServer(options: GatewayServerOptions) {
 
   if (options.licensing) {
     const licensing = options.licensing
-    app.get('/api/v1/setup', { preHandler: requireSession }, async () => ({
-      sdk: {
-        configured: licensing.config.runtimeCredentialsConfigured,
-        ready: licensing.snapshot().ready,
-        version: licensing.config.sdkVersion,
-      },
-      connectionConfigured: options.config.ibkr.allowedAccountIds.length > 0,
-    }))
+    app.get('/api/v1/setup', { preHandler: requireSession }, async () => {
+      const authorization = licensing.snapshot()
+      return {
+        sdk: {
+          configured: licensing.config.runtimeCredentialsConfigured,
+          ready: authorization.ready,
+          state: authorization.state,
+          failure: authorization.failure,
+          expiresAt: authorization.expiresAt,
+          version: licensing.config.sdkVersion,
+        },
+        connectionConfigured: options.config.ibkr.allowedAccountIds.length > 0,
+      }
+    })
     app.put('/api/v1/setup/sdk', { preHandler: [requireSession, requireMutation] }, (request) =>
       licensing.activate(request.body),
+    )
+    app.post('/api/v1/setup/sdk/retry', { preHandler: [requireSession, requireMutation] }, () =>
+      licensing.retry(),
     )
   }
 

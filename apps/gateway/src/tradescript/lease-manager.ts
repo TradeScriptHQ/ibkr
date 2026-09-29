@@ -25,6 +25,7 @@ export interface TradeScriptLeaseSnapshot {
   readonly state: 'unconfigured' | 'exchanging' | 'ready' | 'degraded' | 'error' | 'stopped'
   readonly ready: boolean
   readonly message: string
+  readonly failure?: 'rejected' | 'unavailable'
   readonly expiresAt?: string
   readonly renewAfter?: string
 }
@@ -33,11 +34,13 @@ type Subscriber = (snapshot: TradeScriptLeaseSnapshot) => void
 
 class LeaseExchangeError extends Error {
   readonly retryable: boolean
+  readonly rejected: boolean
 
-  constructor(message: string, retryable: boolean) {
+  constructor(message: string, retryable: boolean, rejected = false) {
     super(message)
     this.name = 'LeaseExchangeError'
     this.retryable = retryable
+    this.rejected = rejected
   }
 }
 
@@ -53,6 +56,7 @@ export class TradeScriptLeaseManager {
   #timer: NodeJS.Timeout | undefined
   #stopped = false
   #retryAttempt = 0
+  #failure: TradeScriptLeaseSnapshot['failure']
 
   constructor(
     config: GatewayConfig['tradescript'],
@@ -69,6 +73,7 @@ export class TradeScriptLeaseManager {
       state: this.#state,
       ready,
       message: this.#message,
+      ...(this.#failure ? { failure: this.#failure } : {}),
       ...(this.#current === undefined
         ? {}
         : { expiresAt: this.#current.expiresAt, renewAfter: this.#current.renewAfter }),
@@ -156,6 +161,7 @@ export class TradeScriptLeaseManager {
         throw new LeaseExchangeError(
           `TradeScript authorization rejected the lease exchange with status ${response.status}.`,
           response.status >= 500 || response.status === 408 || response.status === 429,
+          response.status === 401 || response.status === 403,
         )
       }
       const parsed = LeaseResponseSchema.parse(await response.json())
@@ -175,12 +181,15 @@ export class TradeScriptLeaseManager {
       }
       this.#current = lease
       this.#retryAttempt = 0
+      this.#failure = undefined
       this.#state = 'ready'
       this.#message = 'A valid TradeScript browser deployment lease is cached in memory.'
       this.#notify()
       this.#schedule(Math.max(1_000, renewAfter - now))
       return lease
     } catch (error) {
+      this.#failure =
+        error instanceof LeaseExchangeError && error.rejected ? 'rejected' : 'unavailable'
       const currentValid =
         this.#current !== undefined && Date.parse(this.#current.expiresAt) > this.#now()
       this.#state = currentValid ? 'degraded' : 'error'

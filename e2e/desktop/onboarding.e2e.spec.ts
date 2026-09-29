@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { expect, test } from '@playwright/test'
 import WebSocket from 'ws'
+import type { SetupStatus } from '../../apps/terminal/src/sdk-authorization.js'
 
 let child: ChildProcess
 let dataDir: string
@@ -113,6 +114,14 @@ test('fresh packaged onboarding, activation failure and connection discovery UI'
   await page.getByRole('button', { name: 'Activate SDK' }).click()
   await expect(page.getByRole('alert')).toHaveText('Invalid SDK credentials.')
   await page.unroute('**/api/v1/setup/sdk')
+  await page.route('**/api/v1/setup', (route) =>
+    route.fulfill({
+      json: {
+        sdk: { configured: true, ready: true, state: 'ready', version: '0.1.34' },
+        connectionConfigured: false,
+      },
+    }),
+  )
   await page.route('**/api/v1/setup/sdk', (route) =>
     route.fulfill({ json: { configured: true, ready: true } }),
   )
@@ -132,6 +141,174 @@ test('fresh packaged onboarding, activation failure and connection discovery UI'
   await page.getByRole('button', { name: 'Close', exact: true }).last().click()
   await page.screenshot({ path: test.info().outputPath('desktop-onboarding.png'), fullPage: true })
   expect(errors).toEqual([])
+})
+
+test('replaces rejected credentials during incomplete setup and preserves errors and input across polling', async ({
+  page,
+}) => {
+  let reads = 0
+  let setup: SetupStatus = {
+    sdk: { configured: true, ready: false, state: 'error', failure: 'rejected' },
+    connectionConfigured: false,
+  }
+  await page.route('**/api/v1/setup', (route) => {
+    reads++
+    return route.fulfill({ json: setup })
+  })
+  let attempts = 0
+  await page.route('**/api/v1/setup/sdk', (route) => {
+    attempts++
+    if (attempts === 1)
+      return route.fulfill({
+        status: 400,
+        json: { error: { message: 'Replacement credentials are invalid.' } },
+      })
+    setup = { ...setup, sdk: { configured: true, ready: true, state: 'ready' } }
+    return route.fulfill({ json: { configured: true, ready: true } })
+  })
+  await page.goto(runtimeOrigin)
+  await expect(page.getByText('SDK credentials need updating', { exact: true })).toBeVisible()
+  await page.getByLabel('Credential ID', { exact: true }).fill('replacement-fixture')
+  await page.getByLabel('SDK secret', { exact: true }).fill('replacement-secret-fixture')
+  await page.getByRole('button', { name: 'Update SDK credentials', exact: true }).click()
+  await expect(
+    page.getByText('Replacement credentials are invalid.', { exact: true }),
+  ).toBeVisible()
+  const before = reads
+  await expect.poll(() => reads, { timeout: 12000 }).toBeGreaterThan(before)
+  await expect(
+    page.getByText('Replacement credentials are invalid.', { exact: true }),
+  ).toBeVisible()
+  await expect(page.getByLabel('Credential ID', { exact: true })).toHaveValue('replacement-fixture')
+  await page.getByRole('button', { name: 'Update SDK credentials', exact: true }).click()
+  await expect(page.getByText('SDK credentials saved · Activated')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Connection', exact: true })).toBeVisible()
+  // Even with a valid saved credential and no TWS profile yet, replacement stays accessible.
+  await page.getByRole('button', { name: 'Update SDK credentials', exact: true }).click()
+  await expect(page.getByLabel('SDK secret', { exact: true })).toHaveValue('')
+})
+
+test('detects rejected renewal, recovers after expiry, and reloads with saved workspace intact', async ({
+  page,
+}) => {
+  let setup: SetupStatus = {
+    sdk: { configured: true, ready: true, state: 'ready' },
+    connectionConfigured: true,
+  }
+  let documents = 0
+  page.on('request', (request) => {
+    if (request.isNavigationRequest()) documents++
+  })
+  await page.route('**/api/v1/setup', (route) => route.fulfill({ json: setup }))
+  await page.route('**/api/v1/setup/sdk', (route) => {
+    setup = { ...setup, sdk: { configured: true, ready: true, state: 'ready' } }
+    return route.fulfill({ json: { configured: true, ready: true } })
+  })
+  await page.goto(runtimeOrigin)
+  await expect(page.getByRole('button', { name: 'SDK settings', exact: true })).toBeVisible()
+  await page.evaluate(() => localStorage.setItem('recovery-workspace-fixture', 'saved-layout'))
+  setup = { ...setup, sdk: { ...setup.sdk, state: 'degraded', failure: 'rejected' } }
+  await expect(page.getByText('SDK credentials need updating', { exact: true })).toBeVisible({
+    timeout: 12000,
+  })
+  await expect(page.getByRole('button', { name: 'SDK settings', exact: true })).toBeVisible()
+  setup = { ...setup, sdk: { ...setup.sdk, ready: false, expiresAt: '2026-01-01T00:00:00.000Z' } }
+  await expect(page.getByText('SDK authorization expired', { exact: true })).toBeVisible({
+    timeout: 12000,
+  })
+  await expect(
+    page.getByText('Your TWS connection settings and saved workspace are preserved.'),
+  ).toBeVisible()
+  await page.screenshot({ path: test.info().outputPath('sdk-recovery.png'), fullPage: true })
+  const before = documents
+  await page.getByLabel('Credential ID', { exact: true }).fill('replacement-fixture')
+  await page.getByLabel('SDK secret', { exact: true }).fill('replacement-secret-fixture')
+  await page.getByRole('button', { name: 'Update SDK credentials', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'SDK settings', exact: true })).toBeVisible()
+  expect(documents).toBeGreaterThan(before)
+  expect(await page.evaluate(() => localStorage.getItem('recovery-workspace-fixture'))).toBe(
+    'saved-layout',
+  )
+})
+
+test('retries temporary authorization failures without replacing credentials', async ({ page }) => {
+  let setup: SetupStatus = {
+    sdk: { configured: true, ready: false, state: 'error', failure: 'unavailable' },
+    connectionConfigured: false,
+  }
+  let replacements = 0
+  await page.route('**/api/v1/setup', (route) => route.fulfill({ json: setup }))
+  await page.route('**/api/v1/setup/sdk', (route) => {
+    replacements++
+    return route.abort()
+  })
+  await page.route('**/api/v1/setup/sdk/retry', (route) => {
+    expect(route.request().method()).toBe('POST')
+    expect(route.request().headers()['x-tradescript-csrf']).toBeTruthy()
+    setup = { ...setup, sdk: { configured: true, ready: true, state: 'ready' } }
+    return route.fulfill({ json: { configured: true, ready: true } })
+  })
+  await page.goto(runtimeOrigin)
+  await expect(page.getByText('SDK authorization unavailable', { exact: true })).toBeVisible()
+  await expect(page.getByText('SDK credentials need updating', { exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Retry authorization' }).click()
+  await expect(page.getByText('SDK credentials saved · Activated')).toBeVisible()
+  expect(replacements).toBe(0)
+})
+
+test('offers reload when the local session expires so credential recovery stays accessible', async ({
+  page,
+}) => {
+  let expired = false
+  await page.route('**/api/v1/setup', (route) =>
+    expired
+      ? route.fulfill({ status: 401, json: { error: { message: 'Session expired' } } })
+      : route.fulfill({
+          json: {
+            sdk: { configured: true, ready: false, state: 'error', failure: 'rejected' },
+            connectionConfigured: true,
+          },
+        }),
+  )
+  await page.goto(runtimeOrigin)
+  await expect(page.getByLabel('Credential ID', { exact: true })).toBeVisible()
+  expired = true
+  await expect(page.getByRole('button', { name: 'Reload workstation' })).toBeVisible({
+    timeout: 12000,
+  })
+  expired = false
+  await page.getByRole('button', { name: 'Reload workstation' }).click()
+  await expect(page.getByText('SDK credentials need updating', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Credential ID', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Reload workstation' })).toHaveCount(0)
+})
+
+test('keeps a valid workstation open during a temporary renewal outage and offers retry directly', async ({
+  page,
+}) => {
+  let setup: SetupStatus = {
+    sdk: { configured: true, ready: true, state: 'degraded', failure: 'unavailable' },
+    connectionConfigured: true,
+  }
+  let retried = false
+  await page.route('**/api/v1/setup', (route) => route.fulfill({ json: setup }))
+  await page.route('**/api/v1/setup/sdk/retry', (route) => {
+    retried = true
+    setup = { ...setup, sdk: { configured: true, ready: true, state: 'ready' } }
+    return route.fulfill({ json: { configured: true, ready: true } })
+  })
+  await page.goto(runtimeOrigin)
+  await expect(page.getByRole('button', { name: 'SDK settings', exact: true })).toBeVisible()
+  await expect(page.getByText('SDK renewal temporarily unavailable', { exact: true })).toBeVisible()
+  await expect(
+    page.getByRole('button', { name: 'Update SDK credentials', exact: true }),
+  ).toHaveCount(0)
+  await page.getByRole('button', { name: 'Retry authorization' }).click()
+  await expect(page.getByText('SDK renewal temporarily unavailable', { exact: true })).toHaveCount(
+    0,
+  )
+  await expect(page.getByRole('button', { name: 'SDK settings', exact: true })).toBeVisible()
+  expect(retried).toBe(true)
 })
 
 test('stops packaged services, releases their ports and reopens the workstation', async ({
