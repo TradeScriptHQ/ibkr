@@ -302,6 +302,67 @@ it('requires normal authenticator verification before license readback and store
   restarted.stop()
 })
 
+it.each(['challenge', 'verify'] as const)(
+  'keeps logout authoritative while the authenticator %s response body is pending',
+  async (phase) => {
+    const item = fixture()
+    const factorId = '5f0b6527-a7b3-4e7f-ad2f-458fcb3cd0d8'
+    const challengeId = '9b74e63d-9f79-4b59-90ea-f742bb53370c'
+    item.store.write({
+      ...token,
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      user: { ...token.user, factors: [{ id: factorId, factor_type: 'totp', status: 'verified' }] },
+    })
+    let completeBody: (value: unknown) => void = () => undefined
+    const body = new Promise<unknown>((resolve) => {
+      completeBody = resolve
+    })
+    const parsing = vi.fn()
+    const pendingResponse = Response.json({})
+    vi.spyOn(pendingResponse, 'json').mockImplementation(() => {
+      parsing()
+      return body
+    })
+    item.transport.mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      if (url.pathname === '/api/v1/auth/configuration')
+        return Response.json({
+          supabaseURL: 'https://identity.example.test',
+          publishableKey: 'public-fixture-key',
+        })
+      if (url.pathname.endsWith(`/${phase}`)) return pendingResponse
+      if (url.pathname.endsWith('/challenge')) return Response.json({ id: challengeId })
+      if (url.pathname.endsWith('/verify')) return Response.json(token)
+      return Response.json({
+        account,
+        license,
+        authorization: { credentialId: 'existing-runtime', runtimeCredential: 'existing-secret' },
+      })
+    })
+    const restarted = new TradeScriptAccount(item.store, item.licensing, { fetch: item.transport })
+    const verifying = restarted.verifyMfa('123456')
+    const cancelled = expect(verifying).rejects.toThrow('Sign-in was cancelled')
+    await vi.waitFor(() => expect(parsing).toHaveBeenCalledOnce())
+    restarted.logout()
+    completeBody(
+      phase === 'challenge'
+        ? { id: challengeId }
+        : { ...token, access_token: 'fixture-aal2-access' },
+    )
+    await cancelled
+    expect(restarted.snapshot()).toEqual({ state: 'signed-out' })
+    expect(item.store.read()).toBeUndefined()
+    expect(item.licensing.logout).toHaveBeenCalledOnce()
+    expect(item.licensing.activate).not.toHaveBeenCalled()
+    expect(
+      item.transport.mock.calls.some(
+        ([input]) => new URL(String(input)).pathname === '/api/v1/terminal/license',
+      ),
+    ).toBe(false)
+    restarted.stop()
+  },
+)
+
 it('gives an explicit Sync License retry after slow initial issuance instead of an indefinite preparation message', async () => {
   const item = fixture(true)
   item.transport.mockImplementation(async (input) =>

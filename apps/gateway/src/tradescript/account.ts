@@ -348,8 +348,9 @@ export class TradeScriptAccount {
           400,
           'The authenticator code could not be verified. Try a current code.',
         )
+      const value = await response.json()
       if (generation !== this.#generation) throw new RequestError(409, 'Sign-in was cancelled.')
-      return response.json()
+      return value
     }
     const challenge = z
       .object({ id: z.uuid() })
