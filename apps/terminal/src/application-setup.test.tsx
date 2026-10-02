@@ -72,7 +72,9 @@ describe('application setup presentation', () => {
     expect(html).toContain('Welcome to TradeScript')
     expect(html).toContain('Activate your SDK')
     expect(html).toContain('Connect your broker')
-    expect(html).toContain('No npm token is needed.')
+    expect(html).toContain(
+      'Sign in to TradeScript, or enter your license credentials from TradeScript Console.',
+    )
     expect(html).toContain('aria-label="Activate SDK"')
     expect(html).not.toContain('Cancel replacement')
   })

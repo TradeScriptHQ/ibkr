@@ -182,18 +182,13 @@ export function ApplicationSetupContent({
                       : 'Activate your SDK'}
               </strong>
               <p>
-                {accessNeedsConsole ? (
-                  'Your existing SDK credentials are saved. Restore access in Developer Console, then retry authorization.'
-                ) : recovery && !credentialsNeedUpdating ? (
-                  'Your existing SDK credentials are saved. Resolve the authorization issue above, then retry.'
-                ) : status?.sdk.ready ? (
-                  'Your SDK access is activated on this computer.'
-                ) : (
-                  <>
-                    TradeScript SDK {status?.sdk.version ?? '0.1.34'} is included. Enter the runtime
-                    credentials from Developer Console. No npm token is needed.
-                  </>
-                )}
+                {accessNeedsConsole
+                  ? 'Your existing SDK credentials are saved. Restore access in TradeScript Console, then retry authorization.'
+                  : recovery && !credentialsNeedUpdating
+                    ? 'Your existing SDK credentials are saved. Resolve the authorization issue above, then retry.'
+                    : status?.sdk.ready
+                      ? 'Your SDK access is activated on this computer.'
+                      : 'Sign in to TradeScript, or enter your license credentials from TradeScript Console.'}
               </p>
             </div>
           </div>
