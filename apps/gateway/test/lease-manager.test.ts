@@ -61,6 +61,133 @@ describe('TradeScript deployment lease manager', () => {
     manager.stop()
   })
 
+  it.each([
+    [403, 'trial_access_expired', 'seven-day free trial access'],
+    [403, 'subscription_access_expired', 'Subscription coverage ended. Restore access.'],
+    [403, 'subscription_inactive', 'Subscription is inactive. Resolve billing.'],
+    [403, 'client_suspended', 'Client is suspended. Contact administrator.'],
+    [403, 'sdk_version_not_authorized', 'Install an authorized SDK version.'],
+    [403, 'sdk_build_not_authorized', 'Install the authorized SDK build.'],
+    [403, 'origin_not_authorized', 'Use an authorized browser origin.'],
+    [403, 'deployment_not_authorized', 'Register the application identity.'],
+    [401, 'unauthorized', 'Runtime identity was rejected. Configure a valid identity.'],
+    [400, 'invalid_request', 'Correct the lease request.'],
+    [413, 'invalid_request', 'The request body is too large.'],
+    [415, 'invalid_request', 'Send application/json.'],
+    [404, 'not_found', 'Check the authorization endpoint URL.'],
+    [405, 'method_not_allowed', 'Send a POST request to the lease endpoint.'],
+  ] as const)(
+    'preserves the authenticated expiry reason from status %i',
+    async (status, code, message) => {
+      const fetchMock = vi.fn<typeof fetch>(async () =>
+        Response.json({ error: { code, message } }, { status }),
+      )
+      const manager = new TradeScriptLeaseManager(configured(), { fetch: fetchMock })
+      try {
+        await expect(manager.getLease()).rejects.toThrow(message)
+        expect(manager.snapshot()).toMatchObject({
+          state: 'error',
+          ready: false,
+          failure: 'rejected',
+          failureReason: code,
+        })
+        expect(manager.snapshot().message).toBe(message)
+      } finally {
+        manager.stop()
+      }
+    },
+  )
+
+  it.each([
+    [409, 'authorization_changed'],
+    [503, 'authorization_unavailable'],
+    [500, 'internal_error'],
+  ] as const)('retries status %i without changing the identity', async (status, code) => {
+    const manager = new TradeScriptLeaseManager(configured(), {
+      fetch: vi.fn<typeof fetch>(async () =>
+        Response.json(
+          { error: { code, message: 'Retry with the same saved identity.' } },
+          { status },
+        ),
+      ),
+    })
+    try {
+      await expect(manager.getLease()).rejects.toMatchObject({
+        retryable: true,
+        rejected: false,
+        statusCode: status,
+      })
+      expect(manager.snapshot()).toMatchObject({
+        failure: 'unavailable',
+        failureReason: code,
+        message: 'Retry with the same saved identity.',
+      })
+    } finally {
+      manager.stop()
+    }
+  })
+
+  it('does not infer an expiry reason from an unknown or mismatched error response', async () => {
+    const manager = new TradeScriptLeaseManager(configured(), {
+      fetch: vi.fn<typeof fetch>(async () =>
+        Response.json(
+          {
+            error: {
+              code: 'trial_access_expired',
+              message: 'Your seven-day free trial access has ended. Activate a subscription.',
+            },
+          },
+          { status: 401 },
+        ),
+      ),
+    })
+    try {
+      await expect(manager.getLease()).rejects.toThrow('status 401')
+      expect(manager.snapshot()).not.toHaveProperty('failureReason')
+    } finally {
+      manager.stop()
+    }
+  })
+
+  it('clears an expiry reason after a successful retry with the same credentials', async () => {
+    const now = Date.now()
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockImplementationOnce(async () =>
+        Response.json(
+          {
+            error: {
+              code: 'trial_access_expired',
+              message: 'Your seven-day free trial access has ended. Activate a subscription.',
+            },
+          },
+          { status: 403 },
+        ),
+      )
+      .mockImplementation(async () =>
+        Response.json({
+          lease: 'x'.repeat(64),
+          leaseType: 'TradeScript-Deployment-Lease',
+          expiresAt: new Date(now + 60000).toISOString(),
+          expiresIn: 60,
+          renewAfter: new Date(now + 30000).toISOString(),
+          renewAfterIn: 30,
+          catalogVersion: 'fixture',
+          policy: {},
+        }),
+      )
+    const manager = new TradeScriptLeaseManager(configured(), { fetch: fetchMock })
+    try {
+      await expect(manager.getLease()).rejects.toThrow('seven-day')
+      await manager.refresh()
+      expect(manager.snapshot()).toMatchObject({ state: 'ready', ready: true })
+      expect(manager.snapshot()).not.toHaveProperty('failureReason')
+      expect(manager.snapshot()).not.toHaveProperty('failure')
+    } finally {
+      manager.stop()
+    }
+  })
+
   it.each([401, 403, 503])(
     'preserves the current lease until expiry after renewal returns %i, and recovers',
     async (status) => {

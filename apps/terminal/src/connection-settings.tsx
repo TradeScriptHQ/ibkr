@@ -16,7 +16,7 @@ const connectionTheme = Object.fromEntries(
   ),
 )
 
-export function ConnectionSettingsButton() {
+export function ConnectionSettingsButton({ inline = false }: { inline?: boolean }) {
   const [snapshot, setSnapshot] = useState<ConnectionSnapshot>()
   const [settings, setSettings] = useState<ConnectionSettings>()
   const [open, setOpen] = useState(false)
@@ -128,38 +128,44 @@ export function ConnectionSettingsButton() {
   const profile = settings?.profiles[settings.active]
   return (
     <ChartUiThemeProvider theme="dark" themeStyle={connectionTheme}>
-      <button
-        type="button"
-        className="connection-button"
-        aria-label="Connection"
-        title="Connection settings"
-        onClick={() => setOpen(true)}
-      >
-        {snapshot ? (
-          <>
-            <span className="connection-mode" data-mode={snapshot.settings.active}>
-              <span className="connection-mode-dot" aria-hidden="true" />
-              {snapshot.settings.active === 'live' ? 'Live' : 'Paper'}
-            </span>
-            <span className="connection-endpoint">
-              TWS <span>{snapshot.settings.profiles[snapshot.settings.active].port}</span>
-            </span>
-          </>
-        ) : (
-          <span>Connection</span>
-        )}
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 16 16"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          aria-hidden="true"
+      {inline ? (
+        <button type="button" onClick={() => setOpen(true)}>
+          Configure broker connection
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="connection-button"
+          aria-label="Connection"
+          title="Connection settings"
+          onClick={() => setOpen(true)}
         >
-          <path d="m4 6 4 4 4-4" />
-        </svg>
-      </button>
+          {snapshot ? (
+            <>
+              <span className="connection-mode" data-mode={snapshot.settings.active}>
+                <span className="connection-mode-dot" aria-hidden="true" />
+                {snapshot.settings.active === 'live' ? 'Live' : 'Paper'}
+              </span>
+              <span className="connection-endpoint">
+                TWS <span>{snapshot.settings.profiles[snapshot.settings.active].port}</span>
+              </span>
+            </>
+          ) : (
+            <span>Connection</span>
+          )}
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            aria-hidden="true"
+          >
+            <path d="m4 6 4 4 4-4" />
+          </svg>
+        </button>
+      )}
       <StandardModal
         open={open}
         onOpenChange={(next) => {

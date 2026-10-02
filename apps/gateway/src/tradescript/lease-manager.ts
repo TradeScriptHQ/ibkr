@@ -1,3 +1,8 @@
+import {
+  type TradeScriptAuthorizationErrorCode,
+  tradeScriptAuthorizationErrorCodes,
+  tradeScriptAuthorizationErrorStatus,
+} from '@ibkr-terminal/contracts'
 import { z } from 'zod'
 import type { GatewayConfig } from '../config.js'
 
@@ -26,17 +31,31 @@ export interface TradeScriptLeaseSnapshot {
   readonly ready: boolean
   readonly message: string
   readonly failure?: 'rejected' | 'unavailable'
+  readonly failureReason?: TradeScriptAuthorizationErrorCode
   readonly expiresAt?: string
   readonly renewAfter?: string
 }
 
 type Subscriber = (snapshot: TradeScriptLeaseSnapshot) => void
 
-class LeaseExchangeError extends Error {
+const AuthorizationErrorSchema = z.object({
+  error: z.object({
+    code: z.enum(tradeScriptAuthorizationErrorCodes),
+    message: z.string().min(1).max(2048),
+  }),
+})
+
+export class LeaseExchangeError extends Error {
   readonly retryable: boolean
   readonly rejected: boolean
 
-  constructor(message: string, retryable: boolean, rejected = false) {
+  constructor(
+    message: string,
+    retryable: boolean,
+    rejected = false,
+    readonly failureReason?: TradeScriptLeaseSnapshot['failureReason'],
+    readonly statusCode = 503,
+  ) {
     super(message)
     this.name = 'LeaseExchangeError'
     this.retryable = retryable
@@ -57,6 +76,7 @@ export class TradeScriptLeaseManager {
   #stopped = false
   #retryAttempt = 0
   #failure: TradeScriptLeaseSnapshot['failure']
+  #failureReason: TradeScriptLeaseSnapshot['failureReason']
 
   constructor(
     config: GatewayConfig['tradescript'],
@@ -74,6 +94,7 @@ export class TradeScriptLeaseManager {
       ready,
       message: this.#message,
       ...(this.#failure ? { failure: this.#failure } : {}),
+      ...(this.#failureReason ? { failureReason: this.#failureReason } : {}),
       ...(this.#current === undefined
         ? {}
         : { expiresAt: this.#current.expiresAt, renewAfter: this.#current.renewAfter }),
@@ -174,10 +195,31 @@ export class TradeScriptLeaseManager {
         signal: abort.signal,
       })
       if (!response.ok) {
+        const parsedError = AuthorizationErrorSchema.safeParse(
+          await response.json().catch(() => undefined),
+        )
+        const retryable = response.status >= 500 || [408, 409, 429].includes(response.status)
+        const rejected = [400, 401, 403, 404, 405, 413, 415].includes(response.status)
+        if (
+          parsedError.success &&
+          tradeScriptAuthorizationErrorStatus[parsedError.data.error.code].includes(response.status)
+        ) {
+          // The authority owns the deliberately public reason and recovery guidance.
+          const message = parsedError.data.error.message
+          throw new LeaseExchangeError(
+            message,
+            retryable,
+            rejected,
+            parsedError.data.error.code,
+            response.status,
+          )
+        }
         throw new LeaseExchangeError(
           `TradeScript authorization rejected the lease exchange with status ${response.status}.`,
-          response.status >= 500 || response.status === 408 || response.status === 429,
-          response.status === 401 || response.status === 403,
+          retryable,
+          rejected,
+          undefined,
+          response.status,
         )
       }
       const parsed = LeaseResponseSchema.parse(await response.json())
@@ -198,6 +240,7 @@ export class TradeScriptLeaseManager {
       this.#current = lease
       this.#retryAttempt = 0
       this.#failure = undefined
+      this.#failureReason = undefined
       this.#state = 'ready'
       this.#message = 'A valid TradeScript browser deployment lease is cached in memory.'
       this.#notify()
@@ -206,6 +249,7 @@ export class TradeScriptLeaseManager {
     } catch (error) {
       this.#failure =
         error instanceof LeaseExchangeError && error.rejected ? 'rejected' : 'unavailable'
+      this.#failureReason = error instanceof LeaseExchangeError ? error.failureReason : undefined
       const currentValid =
         this.#current !== undefined && Date.parse(this.#current.expiresAt) > this.#now()
       this.#state = currentValid ? 'degraded' : 'error'

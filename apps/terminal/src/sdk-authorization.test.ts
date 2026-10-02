@@ -1,5 +1,51 @@
 import { expect, it } from 'vitest'
-import { sdkAuthorizationNotice, sdkRenewalPending } from './sdk-authorization.js'
+import {
+  sdkAccessNeedsConsole,
+  sdkAuthorizationNotice,
+  sdkCredentialsNeedUpdating,
+  sdkRenewalPending,
+} from './sdk-authorization.js'
+
+it('explains unpaid localhost expiry without telling users to replace preserved credentials', () => {
+  for (const ready of [false, true]) {
+    const notice = sdkAuthorizationNotice({
+      configured: true,
+      ready,
+      failure: 'rejected',
+      failureReason: 'trial_access_expired',
+      message:
+        'Your seven-day free trial access has ended. Activate a subscription in Developer Console.',
+    })
+    expect(notice?.title).toBe('Free trial access has ended')
+    expect(notice?.message).toContain('seven-day')
+    expect(notice?.message).toContain('subscription')
+    expect(notice?.message).not.toContain('revoked')
+    expect(notice?.message).not.toContain('Enter valid credentials')
+  }
+})
+
+it.each([
+  ['subscription_access_expired', 'Subscription access has ended'],
+  ['subscription_inactive', 'Subscription needs attention'],
+  ['sdk_version_not_authorized', 'SDK version is not authorized'],
+  ['sdk_build_not_authorized', 'SDK build is not authorized'],
+  ['origin_not_authorized', 'Browser origin is not authorized'],
+  ['deployment_not_authorized', 'Application is not authorized'],
+  ['client_suspended', 'SDK access is suspended'],
+  ['authorization_changed', 'SDK authorization changed'],
+  ['authorization_unavailable', 'SDK authorization temporarily unavailable'],
+] as const)('carries the explicit %s reason to recovery', (failureReason, title) => {
+  const notice = sdkAuthorizationNotice({
+    configured: true,
+    ready: false,
+    failureReason,
+    message: 'Detailed reason from the authorization service. Use the same saved credentials.',
+  })
+  expect(notice).toEqual({
+    title,
+    message: 'Detailed reason from the authorization service. Use the same saved credentials.',
+  })
+})
 
 it('does not confuse initial authorization or a network failure with rejected credentials', () => {
   expect(sdkAuthorizationNotice({ configured: false, ready: false })).toBeUndefined()
@@ -43,4 +89,20 @@ it('treats a lease that lapsed without a failed renewal as renewing, not expired
   )
   // Without a previous lease, initial authorization still gates setup.
   expect(sdkRenewalPending({ configured: true, ready: false, state: 'exchanging' })).toBe(false)
+})
+
+it('offers credential replacement only for authentication failures', () => {
+  const sdk = { configured: true, ready: false, failure: 'rejected' as const }
+  expect(sdkCredentialsNeedUpdating({ ...sdk, failureReason: 'unauthorized' })).toBe(true)
+  for (const failureReason of [
+    'trial_access_expired',
+    'subscription_access_expired',
+    'sdk_build_not_authorized',
+    'origin_not_authorized',
+    'internal_error',
+    'authorization_changed',
+  ] as const) {
+    expect(sdkCredentialsNeedUpdating({ ...sdk, failureReason })).toBe(false)
+  }
+  expect(sdkAccessNeedsConsole({ ...sdk, failureReason: 'subscription_access_expired' })).toBe(true)
 })

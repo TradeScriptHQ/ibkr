@@ -7,7 +7,9 @@ use std::{
     process::{Command, Stdio},
     time::Duration,
 };
+mod account;
 mod runtime;
+use account::{open_tradescript_console, terminal_open_requests};
 use runtime::Runtime;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
@@ -97,7 +99,13 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![check_update, install_update])
+        .plugin(tauri_plugin_deep_link::init())
+        .invoke_handler(tauri::generate_handler![
+            check_update,
+            install_update,
+            open_tradescript_console,
+            terminal_open_requests
+        ])
         .setup(|app| {
             let resources = app.path().resource_dir()?;
             let data = app.path().app_local_data_dir()?;

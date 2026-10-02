@@ -1,20 +1,36 @@
 import type { GatewayConfig } from '../config.js'
 import { RequestError } from '../ibkr/request-error.js'
 import { type CredentialStore, RuntimeCredentialSchema } from './credential-store.js'
-import { TradeScriptLeaseManager, type TradeScriptLeaseSnapshot } from './lease-manager.js'
+import {
+  LeaseExchangeError,
+  TradeScriptLeaseManager,
+  type TradeScriptLeaseSnapshot,
+} from './lease-manager.js'
 
 export class Licensing {
   #config: GatewayConfig['tradescript']
   #leases: TradeScriptLeaseManager
   #saving = false
+  #credentialReadFailed = false
   #subscribers = new Set<(snapshot: TradeScriptLeaseSnapshot) => void>()
   #unsubscribe: () => void
   constructor(
     config: GatewayConfig['tradescript'],
     private readonly store: CredentialStore,
   ) {
-    const saved = store.read()
-    this.#config = saved ? { ...config, ...saved, runtimeCredentialsConfigured: true } : config
+    try {
+      const saved = store.read()
+      const { credentialId: _id, credentialSecret: _secret, ...publicConfig } = config
+      this.#config = saved
+        ? { ...config, ...saved, runtimeCredentialsConfigured: true }
+        : store.isSignedOut()
+          ? { ...publicConfig, runtimeCredentialsConfigured: false }
+          : config
+    } catch {
+      this.#credentialReadFailed = true
+      const { credentialId: _id, credentialSecret: _secret, ...publicConfig } = config
+      this.#config = { ...publicConfig, runtimeCredentialsConfigured: false }
+    }
     this.#leases = new TradeScriptLeaseManager(this.#config)
     this.#unsubscribe = this.follow()
   }
@@ -22,7 +38,14 @@ export class Licensing {
     return this.#config
   }
   snapshot() {
-    return this.#leases.snapshot()
+    return this.#credentialReadFailed
+      ? {
+          state: 'error' as const,
+          ready: false,
+          message:
+            'Saved SDK credentials could not be read. Reactivate SDK access to replace them.',
+        }
+      : this.#leases.snapshot()
   }
   renewIfDue() {
     this.#leases.renewIfDue()
@@ -36,7 +59,12 @@ export class Licensing {
     try {
       await this.#leases.refresh()
       return { configured: true, ready: true }
-    } catch {
+    } catch (error) {
+      if (error instanceof LeaseExchangeError)
+        throw new RequestError(error.statusCode, error.message, {
+          source: 'tradescript-authorization',
+          ...(error.failureReason ? { code: error.failureReason } : {}),
+        })
       throw new RequestError(
         400,
         'SDK authorization is still unavailable. Check your internet connection, credentials and licence, then try again.',
@@ -60,9 +88,21 @@ export class Licensing {
     }
   }
   private follow() {
-    return this.#leases.subscribe((snapshot) => {
-      for (const subscriber of this.#subscribers) subscriber(snapshot)
+    return this.#leases.subscribe(() => {
+      for (const subscriber of this.#subscribers) subscriber(this.snapshot())
     })
+  }
+  logout() {
+    if (this.#saving) throw new RequestError(409, 'SDK activation is already in progress.')
+    this.store.clear()
+    this.#unsubscribe()
+    this.#leases.stop()
+    const { credentialId: _id, credentialSecret: _secret, ...publicConfig } = this.#config
+    this.#config = { ...publicConfig, runtimeCredentialsConfigured: false }
+    this.#leases = new TradeScriptLeaseManager(this.#config)
+    this.#credentialReadFailed = false
+    this.#unsubscribe = this.follow()
+    return { configured: false, ready: false }
   }
   async activate(input: unknown) {
     if (this.#saving) throw new RequestError(409, 'SDK activation is already in progress.')
@@ -79,10 +119,16 @@ export class Licensing {
       this.#leases.stop()
       this.#config = config
       this.#leases = candidate
+      this.#credentialReadFailed = false
       this.#unsubscribe = this.follow()
       return { configured: true, ready: true }
-    } catch {
+    } catch (error) {
       candidate.stop()
+      if (error instanceof LeaseExchangeError)
+        throw new RequestError(error.statusCode, error.message, {
+          source: 'tradescript-authorization',
+          ...(error.failureReason ? { code: error.failureReason } : {}),
+        })
       throw new RequestError(
         400,
         'SDK activation failed. Check your credentials, internet connection, and licence for this application origin.',

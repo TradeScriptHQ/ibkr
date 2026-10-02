@@ -1,7 +1,12 @@
 import { timingSafeEqual } from 'node:crypto'
 import cookie from '@fastify/cookie'
 import websocket from '@fastify/websocket'
-import type { SystemStatusResponse, TradeScriptBootstrapResponse } from '@ibkr-terminal/contracts'
+import type {
+  SystemStatusResponse,
+  TradeScriptAuthorizationErrorCode,
+  TradeScriptAuthorizationFailure,
+  TradeScriptBootstrapResponse,
+} from '@ibkr-terminal/contracts'
 import {
   type ConnectionSettings,
   ConnectionSettingsSchema,
@@ -18,6 +23,7 @@ import type { BrokerStateStore } from './ibkr/state-store.js'
 import type { LocalDatabase } from './persistence/database.js'
 import { SESSION_COOKIE_NAME, type SessionStore } from './security/session-store.js'
 import type { WebSocketTicketStore } from './security/websocket-tickets.js'
+import type { TradeScriptAccount } from './tradescript/account.js'
 import type { TradeScriptLeaseManager } from './tradescript/lease-manager.js'
 import type { Licensing } from './tradescript/licensing.js'
 
@@ -28,6 +34,11 @@ const CLIENT_HEADER_VALUE = 'terminal-v1'
 const MAX_SOCKET_BUFFER = 1_000_000
 
 interface GatewayServerOptions {
+  readonly account?: Pick<
+    TradeScriptAccount,
+    'snapshot' | 'login' | 'sync' | 'logout' | 'purchaseURL'
+  > &
+    Partial<Pick<TradeScriptAccount, 'verifyMfa'>>
   readonly licensing?: Pick<Licensing, 'activate' | 'retry' | 'renewIfDue' | 'snapshot' | 'config'>
   readonly connections?: {
     snapshot(): ConnectionSnapshot
@@ -80,11 +91,18 @@ function sendError(
     | 'invalid-csrf'
     | 'not-ready'
     | 'not-found'
-    | 'internal-error',
+    | 'internal-error'
+    | TradeScriptAuthorizationErrorCode,
   message: string,
+  authorizationFailure?: TradeScriptAuthorizationFailure,
 ): FastifyReply {
   return reply.status(statusCode).send({
-    error: { code, message, requestId: request.id },
+    error: {
+      code,
+      message,
+      requestId: request.id,
+      ...(authorizationFailure ? { source: authorizationFailure.source } : {}),
+    },
   })
 }
 
@@ -368,10 +386,13 @@ export async function createGatewayServer(options: GatewayServerOptions) {
           ready: authorization.ready,
           state: authorization.state,
           failure: authorization.failure,
+          failureReason: authorization.failureReason,
+          message: authorization.message,
           expiresAt: authorization.expiresAt,
           version: licensing.config.sdkVersion,
         },
         connectionConfigured: options.config.ibkr.allowedAccountIds.length > 0,
+        ...(options.account ? { account: options.account.snapshot() } : {}),
       }
     })
     app.put('/api/v1/setup/sdk', { preHandler: [requireSession, requireMutation] }, (request) =>
@@ -380,6 +401,43 @@ export async function createGatewayServer(options: GatewayServerOptions) {
     app.post('/api/v1/setup/sdk/retry', { preHandler: [requireSession, requireMutation] }, () =>
       licensing.retry(),
     )
+  }
+
+  if (options.account) {
+    const account = options.account
+    app.post('/api/v1/setup/account/login', { preHandler: [requireSession, requireMutation] }, () =>
+      account.login(),
+    )
+    app.post(
+      '/api/v1/setup/account/sync',
+      { preHandler: [requireSession, requireMutation] },
+      (request) => {
+        const input = request.body as { accountId?: unknown } | undefined
+        if (
+          input?.accountId !== undefined &&
+          (typeof input.accountId !== 'string' ||
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+              input.accountId,
+            ))
+        )
+          throw new RequestError(400, 'The console account identifier is invalid.')
+        return account.sync(input?.accountId as string | undefined)
+      },
+    )
+    app.post(
+      '/api/v1/setup/account/logout',
+      { preHandler: [requireSession, requireMutation] },
+      () => account.logout(),
+    )
+    if (account.verifyMfa)
+      app.post(
+        '/api/v1/setup/account/mfa',
+        { preHandler: [requireSession, requireMutation] },
+        (request) => account.verifyMfa?.((request.body as { code?: unknown } | undefined)?.code),
+      )
+    app.get('/api/v1/setup/account/purchase', { preHandler: requireSession }, () => ({
+      url: account.purchaseURL(),
+    }))
   }
 
   app.get('/api/v1/status', { preHandler: requireSession }, async () => options.getStatus())
@@ -589,8 +647,13 @@ export async function createGatewayServer(options: GatewayServerOptions) {
       request,
       reply,
       statusCode,
-      statusCode < 500 ? 'bad-request' : 'internal-error',
+      error instanceof RequestError && error.authorizationFailure?.code
+        ? error.authorizationFailure.code
+        : statusCode < 500
+          ? 'bad-request'
+          : 'internal-error',
       publicMessage,
+      error instanceof RequestError ? error.authorizationFailure : undefined,
     )
   })
 
