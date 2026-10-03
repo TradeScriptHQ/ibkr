@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CredentialStore } from '../src/tradescript/credential-store.js'
+import { CredentialStore, clearRetiredAccountSession } from '../src/tradescript/credential-store.js'
 import { Licensing } from '../src/tradescript/licensing.js'
 
 const directories: string[] = []
@@ -19,7 +19,23 @@ afterEach(() => {
 const credentials = { credentialId: 'fixture-id', credentialSecret: 'fixture-secret' }
 
 describe('local SDK credentials', () => {
-  it('logs out locally, clears the current lease and credentials, and stays logged out after restart even when environment credentials exist', async () => {
+  it('retires only the obsolete account session and its temporary file, preserving SDK credentials and workspace', () => {
+    const dir = directory()
+    const store = new CredentialStore(join(dir, 'sdk-credentials.json'), randomBytes(32))
+    store.write(credentials)
+    const obsolete = join(dir, 'tradescript-account.json')
+    writeFileSync(obsolete, 'obsolete-session-fixture')
+    writeFileSync(`${obsolete}.tmp`, 'obsolete-pending-session-fixture')
+    writeFileSync(join(dir, 'connections.json'), 'broker-profile-fixture')
+    writeFileSync(join(dir, 'terminal.sqlite'), 'workspace-fixture')
+    clearRetiredAccountSession(obsolete)
+    expect(() => readFileSync(obsolete)).toThrow()
+    expect(() => readFileSync(`${obsolete}.tmp`)).toThrow()
+    expect(store.read()).toEqual(credentials)
+    expect(readFileSync(join(dir, 'connections.json'), 'utf8')).toBe('broker-profile-fixture')
+    expect(readFileSync(join(dir, 'terminal.sqlite'), 'utf8')).toBe('workspace-fixture')
+  })
+  it('clears the current local lease and credentials, preserving the cleared state after restart even when environment credentials exist', async () => {
     const store = new CredentialStore(join(directory(), 'credentials.json'), randomBytes(32))
     store.write(credentials)
     const config = {
@@ -47,7 +63,7 @@ describe('local SDK credentials', () => {
     const licensing = new Licensing(config, store)
     await licensing.getLease()
     expect(licensing.snapshot().ready).toBe(true)
-    licensing.logout()
+    licensing.clearCredentials()
     expect(store.read()).toBeUndefined()
     expect(store.isSignedOut()).toBe(true)
     expect(licensing.config).not.toHaveProperty('credentialSecret')

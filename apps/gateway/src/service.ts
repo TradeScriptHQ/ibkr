@@ -12,8 +12,7 @@ import { SessionStore } from './security/session-store.js'
 import { WebSocketTicketStore } from './security/websocket-tickets.js'
 import { createGatewayServer } from './server.js'
 import { buildSystemStatus } from './status.js'
-import { AccountSessionStore, TradeScriptAccount } from './tradescript/account.js'
-import { CredentialStore } from './tradescript/credential-store.js'
+import { CredentialStore, clearRetiredAccountSession } from './tradescript/credential-store.js'
 import { Licensing } from './tradescript/licensing.js'
 
 export async function startGatewayService() {
@@ -38,6 +37,7 @@ export async function startGatewayService() {
   const stateDirectory =
     environment.TERMINAL_DATA_DIR ??
     fileURLToPath(new URL('../../../.local/state', import.meta.url))
+  clearRetiredAccountSession(join(stateDirectory, 'tradescript-account.json'))
   const dataPath = join(stateDirectory, 'terminal.sqlite')
   const database = new LocalDatabase(dataPath)
   const sessions = new SessionStore()
@@ -60,16 +60,6 @@ export async function startGatewayService() {
         ? Buffer.from(environment.TERMINAL_CREDENTIAL_KEY, 'base64')
         : undefined,
     ),
-  )
-  const account = new TradeScriptAccount(
-    new AccountSessionStore(
-      join(stateDirectory, 'tradescript-account.json'),
-      environment.TERMINAL_CREDENTIAL_KEY
-        ? Buffer.from(environment.TERMINAL_CREDENTIAL_KEY, 'base64')
-        : undefined,
-    ),
-    leases,
-    environment.TRADESCRIPT_CONSOLE_URL ? { consoleURL: environment.TRADESCRIPT_CONSOLE_URL } : {},
   )
   const proxyCapability =
     process.env.INTERNAL_PROXY_CAPABILITY ?? randomBytes(32).toString('base64url')
@@ -122,7 +112,6 @@ export async function startGatewayService() {
     getStatus,
     leases,
     licensing: leases,
-    account,
     get ibkr() {
       return connections.runtime.ibkr
     },
@@ -138,7 +127,6 @@ export async function startGatewayService() {
       try {
         connections.runtime.stop()
         leases.stop()
-        account.stop()
         await app.close()
       } finally {
         database.close()
@@ -154,7 +142,6 @@ export async function startGatewayService() {
     )
       connections.runtime.start()
     leases.start()
-    if (account.snapshot().state === 'signed-in') void account.sync().catch(() => undefined)
   } catch (error) {
     await close()
     throw error

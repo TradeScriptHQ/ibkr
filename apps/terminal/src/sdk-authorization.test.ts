@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import {
-  sdkAccessNeedsConsole,
+  sdkAccessNeedsRenewal,
   sdkAuthorizationNotice,
   sdkCredentialsNeedUpdating,
   sdkRenewalPending,
@@ -104,5 +104,5 @@ it('offers credential replacement only for authentication failures', () => {
   ] as const) {
     expect(sdkCredentialsNeedUpdating({ ...sdk, failureReason })).toBe(false)
   }
-  expect(sdkAccessNeedsConsole({ ...sdk, failureReason: 'subscription_access_expired' })).toBe(true)
+  expect(sdkAccessNeedsRenewal({ ...sdk, failureReason: 'subscription_access_expired' })).toBe(true)
 })

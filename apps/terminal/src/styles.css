@@ -1161,18 +1161,6 @@ h1 {
   flex-wrap: wrap;
   gap: 10px;
 }
-.setup-account-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 12px;
-}
-.setup-account-actions button {
-  padding: 10px 14px;
-}
-.setup-account > strong {
-  overflow-wrap: anywhere;
-}
 .setup-credential-actions button {
   max-width: 100%;
   min-height: 40px;

@@ -5,6 +5,9 @@ ledger locally. SDK credentials are encrypted with a random key held in macOS
 Keychain or Windows Credential Manager. Source-mode installations store runtime
 credentials in an owner-only local file; environment credentials remain supported.
 
+The app has no TradeScript account login, purchase, or console account sync.
+Entering or clearing a Client key and Secret changes local SDK access only.
+
 SDK runtime credentials are sent to the TradeScript authorization service to
 obtain and renew a deployment lease. The permanent secret is not embedded in the
 frontend, browser storage, or installers.

@@ -7,12 +7,21 @@ use std::{
     process::{Command, Stdio},
     time::Duration,
 };
-mod account;
 mod runtime;
-use account::{open_tradescript_console, terminal_open_requests};
 use runtime::Runtime;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_updater::UpdaterExt;
+
+fn foreground_terminal(app: &tauri::AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "macos")]
+        app.show()?;
+        window.unminimize()?;
+        window.show()?;
+        window.set_focus()?;
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod update_permissions;
@@ -94,17 +103,12 @@ async fn install_update(app: tauri::AppHandle, version: String) -> Result<(), St
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_focus();
-            }
+            let _ = foreground_terminal(app);
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(tauri::generate_handler![
             check_update,
             install_update,
-            open_tradescript_console,
-            terminal_open_requests
         ])
         .setup(|app| {
             let resources = app.path().resource_dir()?;
@@ -196,4 +200,14 @@ fn main() {
             handle.state::<Runtime>().stop();
         }
     });
+}
+
+#[cfg(test)]
+mod account_boundary_tests {
+    #[test]
+    fn desktop_does_not_register_console_account_callbacks() {
+        let config: tauri::Config =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert!(!config.plugins.0.contains_key("deep-link"));
+    }
 }

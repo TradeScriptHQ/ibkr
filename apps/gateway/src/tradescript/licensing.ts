@@ -92,7 +92,7 @@ export class Licensing {
       for (const subscriber of this.#subscribers) subscriber(this.snapshot())
     })
   }
-  logout() {
+  clearCredentials() {
     if (this.#saving) throw new RequestError(409, 'SDK activation is already in progress.')
     this.store.clear()
     this.#unsubscribe()
@@ -107,8 +107,7 @@ export class Licensing {
   async activate(input: unknown) {
     if (this.#saving) throw new RequestError(409, 'SDK activation is already in progress.')
     const parsed = RuntimeCredentialSchema.safeParse(input)
-    if (!parsed.success)
-      throw new RequestError(400, 'Enter the SDK credential ID and secret from Developer Console.')
+    if (!parsed.success) throw new RequestError(400, 'Enter your Client key and Secret.')
     this.#saving = true
     const config = { ...this.#config, ...parsed.data, runtimeCredentialsConfigured: true }
     const candidate = new TradeScriptLeaseManager(config)

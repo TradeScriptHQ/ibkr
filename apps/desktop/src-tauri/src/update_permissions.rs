@@ -13,6 +13,9 @@ fn compiled_update_permissions_only_allow_the_workstation_origin_and_window() {
         serde_json::from_str(include_str!("../gen/schemas/capabilities.json")).unwrap();
     let resolved = Resolved::resolve(&manifests, capabilities, Target::current()).unwrap();
     assert!(resolved.has_app_acl);
+    for removed in ["open_tradescript_console", "terminal_open_requests"] {
+        assert!(!resolved.allowed_commands.contains_key(removed));
+    }
     for command in [
         "check_update",
         "install_update",

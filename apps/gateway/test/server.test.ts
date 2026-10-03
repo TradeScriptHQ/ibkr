@@ -67,6 +67,7 @@ it('exposes safe SDK recovery status and protects authorization retries with ses
       retry,
       renewIfDue,
       activate: async () => ({ configured: true, ready: true }),
+      clearCredentials: () => ({ configured: false, ready: false }),
       snapshot: () => ({ state: 'error', ready: false, failure: 'rejected', message: 'rejected' }),
     },
   })

@@ -1,5 +1,3 @@
-import { invoke, isTauri } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
 import { ChartUiThemeProvider, StandardModal } from '@tradescript/pro/react/ui'
 import type { ChartTheme } from '@tradescript/pro/sdk'
 import { chartButtonThemeStyle } from '@tradescript/pro/sdk/theme'
@@ -8,17 +6,12 @@ import { ConnectionSettingsButton } from './connection-settings.js'
 import { LegalNotices } from './legal-notices.js'
 import {
   type SetupStatus,
-  sdkAccessNeedsConsole,
+  sdkAccessNeedsRenewal,
   sdkAuthorizationNotice,
   sdkCredentialsNeedUpdating,
   sdkRenewalPending,
 } from './sdk-authorization.js'
 import { bootstrapBrowserSession, CLIENT_HEADERS } from './terminal-session.js'
-import {
-  appOpeningAccountId,
-  openTradeScriptConsole,
-  TradeScriptAccountControls,
-} from './tradescript-account.js'
 import { WORKSTATION_THEME } from './workstation-theme.js'
 
 const settingsTheme: ChartTheme = {
@@ -38,8 +31,6 @@ const themeStyle = Object.fromEntries(
   ),
 )
 const OPEN_SETTINGS = 'terminal:application-settings'
-const LOG_OUT = 'terminal:log-out'
-const SYNC_LICENSE = 'terminal:sync-license'
 
 interface ApplicationSetupContentProps {
   status: SetupStatus | undefined
@@ -59,11 +50,7 @@ interface ApplicationSetupContentProps {
   onCancelReplacement: () => void
   onRefresh: () => void
   onReload: () => void
-  onLogin?: () => void
-  onSyncLicense?: () => void
-  onBuyLicense?: () => void
-  onLogout?: () => void
-  onVerifyMfa?: (code: string) => void
+  onClearCredentials: () => void
 }
 
 /** Presentation shared by first-run setup, access recovery and saved settings. */
@@ -85,16 +72,12 @@ export function ApplicationSetupContent({
   onCancelReplacement,
   onRefresh,
   onReload,
-  onLogin,
-  onSyncLicense,
-  onBuyLicense,
-  onLogout,
-  onVerifyMfa,
+  onClearCredentials,
 }: ApplicationSetupContentProps) {
   const renewing = status !== undefined && sdkRenewalPending(status.sdk)
   const recovery = status?.sdk.configured && !status.sdk.ready && !renewing
   const notice = status && sdkAuthorizationNotice(status.sdk)
-  const accessNeedsConsole = status !== undefined && sdkAccessNeedsConsole(status.sdk)
+  const accessNeedsRenewal = status !== undefined && sdkAccessNeedsRenewal(status.sdk)
   const credentialsNeedUpdating = status !== undefined && sdkCredentialsNeedUpdating(status.sdk)
   const showCredentials =
     !status?.sdk.configured || (recovery && credentialsNeedUpdating) || replacementRequested
@@ -117,37 +100,10 @@ export function ApplicationSetupContent({
           </p>
         </div>
       </div>
-      {status?.account && onLogin && onSyncLicense && onBuyLicense && onLogout && (
-        <TradeScriptAccountControls
-          account={status.account}
-          configured={status.sdk.configured}
-          busy={busy}
-          onLogin={onLogin}
-          onSync={onSyncLicense}
-          onBuy={onBuyLicense}
-          onLogout={onLogout}
-          {...(onVerifyMfa ? { onVerifyMfa } : {})}
-        />
-      )}
       {notice && (
         <div className="setup-authorization-notice" role="alert">
           <strong>{notice.title}</strong>
           <p>{notice.message}</p>
-          {accessNeedsConsole &&
-            !status?.account &&
-            (onBuyLicense ? (
-              <button type="button" disabled={busy} onClick={onBuyLicense}>
-                Buy license
-              </button>
-            ) : (
-              <a
-                href="https://console.tradescript.dev/login?mode=trader&plan=individual"
-                target="_blank"
-                rel="noreferrer"
-              >
-                Buy license
-              </a>
-            ))}
           <button type="button" disabled={busy} onClick={onRetry}>
             {busy ? 'Please wait…' : 'Retry authorization'}
           </button>
@@ -173,7 +129,7 @@ export function ApplicationSetupContent({
             <span>01</span>
             <div>
               <strong>
-                {accessNeedsConsole
+                {accessNeedsRenewal
                   ? 'Restore subscription access'
                   : recovery
                     ? 'Restore SDK authorization'
@@ -182,13 +138,13 @@ export function ApplicationSetupContent({
                       : 'Activate your SDK'}
               </strong>
               <p>
-                {accessNeedsConsole
-                  ? 'Your existing SDK credentials are saved. Restore access in TradeScript Console, then retry authorization.'
+                {accessNeedsRenewal
+                  ? 'Your existing SDK credentials are saved. Restore your licence coverage, then retry authorization.'
                   : recovery && !credentialsNeedUpdating
                     ? 'Your existing SDK credentials are saved. Resolve the authorization issue above, then retry.'
                     : status?.sdk.ready
                       ? 'Your SDK access is activated on this computer.'
-                      : 'Sign in to TradeScript, or enter your license credentials from TradeScript Console.'}
+                      : 'Enter your Client key and Secret to activate the charts library on this computer.'}
               </p>
             </div>
           </div>
@@ -210,7 +166,7 @@ export function ApplicationSetupContent({
         >
           {replacementRequested && <strong>Replace SDK credentials</strong>}
           <label>
-            Credential ID
+            Client key
             <input
               autoComplete="off"
               required
@@ -220,7 +176,7 @@ export function ApplicationSetupContent({
             />
           </label>
           <label>
-            SDK secret
+            Secret
             <input
               type="password"
               autoComplete="off"
@@ -249,6 +205,11 @@ export function ApplicationSetupContent({
             )}
           </div>
         </form>
+      )}
+      {status?.sdk.configured && (
+        <button type="button" disabled={busy} onClick={onClearCredentials}>
+          Clear credentials
+        </button>
       )}
       <p className="setup-privacy">
         Credentials stay on this computer and are sent to TradeScript only to activate and renew
@@ -335,29 +296,13 @@ async function setupMutationFailureMessage(
 
 export function ApplicationSettingsButton() {
   return (
-    <>
-      <button
-        type="button"
-        className="chart-data-action"
-        onClick={() => window.dispatchEvent(new Event(OPEN_SETTINGS))}
-      >
-        SDK settings
-      </button>
-      <button
-        type="button"
-        className="chart-data-action"
-        onClick={() => window.dispatchEvent(new Event(SYNC_LICENSE))}
-      >
-        Sync License
-      </button>
-      <button
-        type="button"
-        className="chart-data-action"
-        onClick={() => window.dispatchEvent(new Event(LOG_OUT))}
-      >
-        Log out
-      </button>
-    </>
+    <button
+      type="button"
+      className="chart-data-action"
+      onClick={() => window.dispatchEvent(new Event(OPEN_SETTINGS))}
+    >
+      SDK settings
+    </button>
   )
 }
 
@@ -373,9 +318,6 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false)
   const mutationInFlight = useRef(false)
   const requestGeneration = useRef(0)
-  const accountAction = useRef<
-    (action: 'login' | 'sync' | 'logout' | 'purchase' | 'mfa', accountId?: string) => Promise<void>
-  >(async () => undefined)
   const mock = import.meta.env.VITE_TRADING_MODE === 'mock'
   const clearReplacement = () => {
     setReplacementRequested(false)
@@ -500,7 +442,7 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
       void refresh()
     }
   }
-  accountAction.current = async (action, accountId) => {
+  const clearCredentials = async () => {
     if (mutationInFlight.current) return
     mutationInFlight.current = true
     ++requestGeneration.current
@@ -508,101 +450,49 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
     setError('')
     try {
       const session = await bootstrapBrowserSession()
-      const response = await fetch(`/api/v1/setup/account/${action}`, {
-        method: action === 'purchase' ? 'GET' : 'POST',
+      const response = await fetch('/api/v1/setup/sdk', {
+        method: 'DELETE',
         headers: { ...CLIENT_HEADERS, 'x-tradescript-csrf': session.csrfToken },
-        ...(action === 'purchase'
-          ? {}
-          : {
-              body: JSON.stringify(
-                action === 'mfa' ? { code: accountId } : accountId ? { accountId } : {},
-              ),
-            }),
+        body: '{}',
       })
       if (!response.ok) {
         const failure = await setupMutationFailureMessage(
           response,
-          'Could not update your TradeScript account. Try again.',
+          'Could not clear the saved credentials.',
         )
         setSessionExpired(failure.sessionExpired)
         throw new Error(failure.message)
       }
-      const result = await response.json()
-      if (action === 'login' || action === 'purchase') await openTradeScriptConsole(result.url)
-      if (action === 'logout') {
-        clearReplacement()
-        setSettingsOpen(false)
-        setStatus((previous) =>
-          previous
-            ? {
-                ...previous,
-                sdk: {
-                  configured: false,
-                  ready: false,
-                  state: 'unconfigured',
-                  ...(previous.sdk.version ? { version: previous.sdk.version } : {}),
-                },
-                account: { state: 'signed-out' },
-              }
-            : previous,
-        )
-      }
-      if ((action === 'sync' || action === 'mfa') && status?.connectionConfigured)
-        window.location.reload()
-    } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : 'Could not update your TradeScript account.',
+      clearReplacement()
+      setSettingsOpen(false)
+      setStatus((previous) =>
+        previous
+          ? {
+              ...previous,
+              sdk: {
+                configured: false,
+                ready: false,
+                state: 'unconfigured',
+                ...(previous.sdk.version ? { version: previous.sdk.version } : {}),
+              },
+            }
+          : previous,
       )
-      setSettingsOpen(true)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not clear the saved credentials.')
     } finally {
       mutationInFlight.current = false
       setBusy(false)
       void refresh()
     }
   }
-  useEffect(() => {
-    const logout = () => void accountAction.current('logout')
-    const sync = () => void accountAction.current('sync')
-    window.addEventListener(LOG_OUT, logout)
-    window.addEventListener(SYNC_LICENSE, sync)
-    let closed = false
-    let unlisten: (() => void) | undefined
-    const openRequest = (urls: string[]) => {
-      if (closed) return
-      for (const url of urls) {
-        const accountId = appOpeningAccountId(url)
-        if (accountId) {
-          setSettingsOpen(true)
-          void accountAction.current('sync', accountId)
-          break
-        }
-      }
-    }
-    if (isTauri()) {
-      void listen<string[]>('deep-link://new-url', ({ payload }) => openRequest(payload))
-        .then((stop) => {
-          if (closed) stop()
-          else unlisten = stop
-        })
-        .catch(() => setError('App-opening requests are unavailable. Use Sync License.'))
-      void invoke<string[]>('terminal_open_requests')
-        .then(openRequest)
-        .catch(() => undefined)
-    }
-    return () => {
-      closed = true
-      unlisten?.()
-      window.removeEventListener(LOG_OUT, logout)
-      window.removeEventListener(SYNC_LICENSE, sync)
-    }
-  }, [])
   if (mock) return children
   // A pending renewal keeps the workstation open; recovery starts only once it fails.
   const renewing = status !== undefined && sdkRenewalPending(status.sdk)
   const complete =
     status?.sdk.configured && (status.sdk.ready || renewing) && status.connectionConfigured
   const notice = status && sdkAuthorizationNotice(status.sdk)
-  const accessNeedsConsole = status !== undefined && sdkAccessNeedsConsole(status.sdk)
+  const accessNeedsRenewal = status !== undefined && sdkAccessNeedsRenewal(status.sdk)
   const content = (
     <ApplicationSetupContent
       status={status}
@@ -622,11 +512,7 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
       onCancelReplacement={clearReplacement}
       onRefresh={() => void refresh()}
       onReload={() => window.location.reload()}
-      onLogin={() => void accountAction.current('login')}
-      onSyncLicense={() => void accountAction.current('sync')}
-      onBuyLicense={() => void accountAction.current('purchase')}
-      onLogout={() => void accountAction.current('logout')}
-      onVerifyMfa={(code) => void accountAction.current('mfa', code)}
+      onClearCredentials={() => void clearCredentials()}
     />
   )
   return (
@@ -646,17 +532,8 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
           <aside className="sdk-authorization-notice" role="alert">
             <strong>{notice.title}</strong>
             <p>{notice.message}</p>
-            {accessNeedsConsole && (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void accountAction.current('purchase')}
-              >
-                Buy license
-              </button>
-            )}
             {error && <p>{error}</p>}
-            {status?.sdk.failure === 'unavailable' || accessNeedsConsole ? (
+            {status?.sdk.failure === 'unavailable' || accessNeedsRenewal ? (
               <button type="button" disabled={busy} onClick={() => void retry()}>
                 {busy ? 'Please wait…' : 'Retry authorization'}
               </button>

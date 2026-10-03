@@ -44,9 +44,6 @@
     ]
   },
   "plugins": {
-    "deep-link": {
-      "desktop": { "schemes": ["tradescript-terminal"] }
-    },
     "updater": {
       "pubkey": "",
       "endpoints": []

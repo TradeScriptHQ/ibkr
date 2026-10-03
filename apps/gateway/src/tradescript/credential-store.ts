@@ -37,7 +37,12 @@ export class CredentialStore {
     this.store.write(RuntimeCredentialSchema.parse(value))
   }
   clear(): void {
-    // A persisted logout must also suppress source-install environment credentials on restart.
+    // An explicit local credential clear must also suppress source-install environment credentials on restart.
     this.store.write({ signedOut: true })
   }
+}
+
+/** Retire the obsolete console session at its explicit app-owned path. SDK credentials are separate. */
+export function clearRetiredAccountSession(path: string): void {
+  new PrivateStore(path, z.unknown()).clear()
 }

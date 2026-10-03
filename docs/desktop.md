@@ -33,7 +33,7 @@ repository `.env` and never touches `.local`; the Tauri shell passes its
 `TERMINAL_DESKTOP=1`, so the gateway skips the root `.env` and uses the OS-keychain
 credential store. Web and source development instead use `.local/state`
 (`TERMINAL_DATA_DIR` override) and the repository `.env`. A fresh desktop install
-is therefore unconfigured and shows first-run setup until credentials and a
+is therefore unconfigured and shows manual Client key and Secret setup until credentials and a
 connection are saved.
 
 macOS uses Keychain; Windows uses Credential Manager for the credential encryption
@@ -41,6 +41,15 @@ key. SDK secrets are AES-GCM encrypted in app-local data. Losing the OS key mean
 restoring it or resetting credentials; do not silently replace an existing key.
 Workspace webview storage persists at the stable origin. Closing the window stops
 owned local services, never TWS and never broker orders.
+
+The app is a separate SDK consumer with manual **Client key** and **Secret** entry.
+It does not log into TradeScript Console, buy a subscription, sync a console account,
+or register a console app-opening callback. SDK authorization and renewal still apply.
+
+**Clear credentials** removes saved local SDK access and the current lease; it does not
+revoke cloud credentials or change licences, TWS profiles, orders, or the workspace.
+The explicit cleared state survives a restart. Obsolete local console login sessions
+are retired on startup without changing existing SDK credentials.
 
 ## Recover SDK access
 
@@ -52,7 +61,7 @@ notice offers **Update SDK credentials** without closing the workstation. Once
 authorization expires after a failed renewal, the app shows **Restore SDK access**
 with replacement fields, including when TWS setup has not been completed.
 
-Use new runtime credentials from Developer Console, or choose **Retry authorization**
+Enter a valid Client key and Secret, or choose **Retry authorization**
 after renewing a licence or restoring connectivity. Network failures are shown
 separately from rejected credentials. Replacement credentials are validated before
 the encrypted saved credentials are overwritten; a failed attempt preserves the

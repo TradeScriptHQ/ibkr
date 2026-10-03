@@ -39,6 +39,7 @@ function content(status: SetupStatus, settingsMode = false, replacementRequested
       onCancelReplacement={noop}
       onRefresh={noop}
       onReload={noop}
+      onClearCredentials={noop}
     />,
   )
 }
@@ -50,6 +51,7 @@ describe('application setup presentation', () => {
     expect(html).toContain('SDK 0.1.34')
     expect(html).toContain('Connection settings saved')
     expect(html).toContain('Replace credentials')
+    expect(html).toContain('Clear credentials')
     expect(html).not.toMatch(/Welcome|Restore|Connect your broker|<form|<input/u)
     expect(html).toContain('Licences and data information')
     expect(html).toContain('separate licences')
@@ -59,7 +61,7 @@ describe('application setup presentation', () => {
   it('shows blank replacement fields only after an explicit request', () => {
     const html = content(ready, true, true)
     expect(html).toContain('aria-label="Replace SDK credentials"')
-    expect(html).toContain('Credential ID')
+    expect(html).toContain('Client key')
     expect(html).toMatch(/type="password"[^>]*value=""/u)
     expect(html).toContain('autoComplete="off"')
     expect(html).toContain('Cancel replacement')
@@ -73,10 +75,13 @@ describe('application setup presentation', () => {
     expect(html).toContain('Activate your SDK')
     expect(html).toContain('Connect your broker')
     expect(html).toContain(
-      'Sign in to TradeScript, or enter your license credentials from TradeScript Console.',
+      'Enter your Client key and Secret to activate the charts library on this computer.',
     )
     expect(html).toContain('aria-label="Activate SDK"')
     expect(html).not.toContain('Cancel replacement')
+    expect(html).toContain('Client key')
+    expect(html).toContain('Secret')
+    expect(html).not.toMatch(/Log in|Sign in|Buy license|Sync License|console\.tradescript\.dev/u)
   })
 
   it('keeps successful SDK activation visible while broker setup remains incomplete', () => {
@@ -95,7 +100,7 @@ describe('application setup presentation', () => {
     })
     expect(html).toContain('Restore SDK access')
     expect(html).toContain('SDK credentials need updating')
-    expect(html).toContain('Credential ID')
+    expect(html).toContain('Client key')
     expect(html).toContain('Your broker connection settings and saved workspace are preserved.')
     expect(html).not.toContain('Welcome to TradeScript')
   })
@@ -108,7 +113,7 @@ describe('application setup presentation', () => {
     expect(html).not.toContain('<input')
   })
 
-  it('directs expired subscription access to Developer Console without replacing credentials', () => {
+  it('preserves credentials on subscription expiry without console account or purchase actions', () => {
     const html = content({
       ...ready,
       sdk: {
@@ -119,7 +124,7 @@ describe('application setup presentation', () => {
       },
     })
     expect(html).toContain('Subscription access has ended')
-    expect(html).toContain('https://console.tradescript.dev')
+    expect(html).not.toMatch(/console\.tradescript\.dev|Buy license|Log in|Sync License/u)
     expect(html).toContain('Restore subscription access')
     expect(html).not.toContain('<input')
   })

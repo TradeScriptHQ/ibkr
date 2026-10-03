@@ -1,21 +1,6 @@
 import type { TradeScriptAuthorizationErrorCode } from '@ibkr-terminal/contracts'
 
 export interface SetupStatus {
-  account?: {
-    state: 'signed-out' | 'authenticating' | 'signed-in' | 'mfa-required' | 'error'
-    account?: { id: string; email: string }
-    license?: {
-      status: 'not-provisioned' | 'pending' | 'active' | 'expired' | 'inactive'
-      kind?: 'trial' | 'paid' | null
-      plan?: string | null
-      trialStartedAt?: string | null
-      trialEndsAt?: string | null
-      trialDays: number
-      accessEndsAt?: string | null
-      credentialsAvailable: boolean
-    }
-    message?: string
-  }
   sdk: {
     configured: boolean
     ready: boolean
@@ -48,14 +33,14 @@ export function sdkAuthorizationNotice(sdk: SetupStatus['sdk']) {
       title: 'SDK authorization expired',
       message:
         sdk.failure === 'rejected'
-          ? 'Your saved SDK credentials are no longer accepted. Enter valid credentials from Developer Console below, or retry after renewing your licence.'
+          ? 'Your saved SDK credentials are no longer accepted. Enter a valid Client key and Secret below, or retry after renewing your licence.'
           : 'We could not renew SDK access. Check your internet connection and retry. Your saved credentials have not been changed.',
     }
   if (sdk.failure === 'rejected')
     return {
       title: 'SDK credentials need updating',
       message:
-        'Your saved SDK credentials were rejected. Check the credential ID and secret in Developer Console; they may be incorrect or revoked.',
+        'Your saved SDK credentials were rejected. Check your Client key and Secret; they may be incorrect or revoked.',
     }
   if (sdk.failure === 'unavailable' || (!sdk.ready && sdk.state === 'error'))
     return {
@@ -85,7 +70,7 @@ const authorizationErrorTitles: Record<TradeScriptAuthorizationErrorCode, string
   internal_error: 'SDK authorization service error',
 }
 
-export function sdkAccessNeedsConsole(sdk: SetupStatus['sdk']) {
+export function sdkAccessNeedsRenewal(sdk: SetupStatus['sdk']) {
   return (
     sdk.failureReason === 'trial_access_expired' ||
     sdk.failureReason === 'subscription_access_expired' ||

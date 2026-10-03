@@ -1,4 +1,0 @@
-[[permission]]
-identifier = "allow-terminal-account"
-description = "Open validated TradeScript Console links and receive app-opening requests."
-commands.allow = ["open_tradescript_console", "terminal_open_requests"]

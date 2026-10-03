@@ -29,7 +29,9 @@ export class PrivateStore<T> {
       )
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-      throw new Error('Saved TradeScript access could not be read. Log in again to restore access.')
+      throw new Error(
+        'Saved credentials could not be read. Restore access to your credential store.',
+      )
     }
   }
 

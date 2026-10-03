@@ -19,7 +19,7 @@ npm ci
 npm run dev
 ```
 
-Open **http://localhost:3000**. Enter your SDK runtime credentials in first-run
+Open **http://localhost:3000**. Enter your Client key and Secret in first-run
 setup, then test and apply a TWS connection. Runtime credentials are separate from
 the package download token. TWS normally uses port `7497` for paper and `7496` for
 live; the connection must also match the selected account environment.

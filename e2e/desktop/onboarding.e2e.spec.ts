@@ -83,7 +83,7 @@ test('fresh packaged onboarding, activation failure and connection discovery UI'
   page.on('pageerror', (error) => errors.push(error.message))
   await page.goto(runtimeOrigin)
   await expect(page.getByText('Welcome to TradeScript')).toBeVisible()
-  await expect(page.getByLabel('Credential ID', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Client key', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Activate SDK' })).toBeDisabled()
   // Test gateway validation without contacting the licensing service or any TWS.
   const result = await page.evaluate(async () => {
@@ -109,8 +109,8 @@ test('fresh packaged onboarding, activation failure and connection discovery UI'
   await page.route('**/api/v1/setup/sdk', (route) =>
     route.fulfill({ status: 400, json: { error: { message: 'Invalid SDK credentials.' } } }),
   )
-  await page.getByLabel('Credential ID', { exact: true }).fill('test-id')
-  await page.getByLabel('SDK secret', { exact: true }).fill('test-secret')
+  await page.getByLabel('Client key', { exact: true }).fill('test-id')
+  await page.getByLabel('Secret', { exact: true }).fill('test-secret')
   await page.getByRole('button', { name: 'Activate SDK' }).click()
   await expect(page.getByRole('alert')).toHaveText('Invalid SDK credentials.')
   await page.unroute('**/api/v1/setup/sdk')
@@ -168,8 +168,8 @@ test('replaces rejected credentials during incomplete setup and preserves errors
   })
   await page.goto(runtimeOrigin)
   await expect(page.getByText('SDK credentials need updating', { exact: true })).toBeVisible()
-  await page.getByLabel('Credential ID', { exact: true }).fill('replacement-fixture')
-  await page.getByLabel('SDK secret', { exact: true }).fill('replacement-secret-fixture')
+  await page.getByLabel('Client key', { exact: true }).fill('replacement-fixture')
+  await page.getByLabel('Secret', { exact: true }).fill('replacement-secret-fixture')
   await page.getByRole('button', { name: 'Update SDK credentials', exact: true }).click()
   await expect(
     page.getByText('Replacement credentials are invalid.', { exact: true }),
@@ -179,13 +179,13 @@ test('replaces rejected credentials during incomplete setup and preserves errors
   await expect(
     page.getByText('Replacement credentials are invalid.', { exact: true }),
   ).toBeVisible()
-  await expect(page.getByLabel('Credential ID', { exact: true })).toHaveValue('replacement-fixture')
+  await expect(page.getByLabel('Client key', { exact: true })).toHaveValue('replacement-fixture')
   await page.getByRole('button', { name: 'Update SDK credentials', exact: true }).click()
   await expect(page.getByText('SDK credentials saved · Activated')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Connection', exact: true })).toBeVisible()
   // Even with a valid saved credential and no TWS profile yet, replacement stays accessible.
   await page.getByRole('button', { name: 'Update SDK credentials', exact: true }).click()
-  await expect(page.getByLabel('SDK secret', { exact: true })).toHaveValue('')
+  await expect(page.getByLabel('Secret', { exact: true })).toHaveValue('')
 })
 
 test('detects rejected renewal, recovers after expiry, and reloads with saved workspace intact', async ({
@@ -221,8 +221,8 @@ test('detects rejected renewal, recovers after expiry, and reloads with saved wo
   ).toBeVisible()
   await page.screenshot({ path: test.info().outputPath('sdk-recovery.png'), fullPage: true })
   const before = documents
-  await page.getByLabel('Credential ID', { exact: true }).fill('replacement-fixture')
-  await page.getByLabel('SDK secret', { exact: true }).fill('replacement-secret-fixture')
+  await page.getByLabel('Client key', { exact: true }).fill('replacement-fixture')
+  await page.getByLabel('Secret', { exact: true }).fill('replacement-secret-fixture')
   await page.getByRole('button', { name: 'Update SDK credentials', exact: true }).click()
   await expect(page.getByRole('button', { name: 'SDK settings', exact: true })).toBeVisible()
   expect(documents).toBeGreaterThan(before)
@@ -271,7 +271,7 @@ test('offers reload when the local session expires so credential recovery stays 
         }),
   )
   await page.goto(runtimeOrigin)
-  await expect(page.getByLabel('Credential ID', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Client key', { exact: true })).toBeVisible()
   expired = true
   await expect(page.getByRole('button', { name: 'Reload workstation' })).toBeVisible({
     timeout: 12000,
@@ -279,7 +279,7 @@ test('offers reload when the local session expires so credential recovery stays 
   expired = false
   await page.getByRole('button', { name: 'Reload workstation' }).click()
   await expect(page.getByText('SDK credentials need updating', { exact: true })).toBeVisible()
-  await expect(page.getByLabel('Credential ID', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('Client key', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Reload workstation' })).toHaveCount(0)
 })
 
