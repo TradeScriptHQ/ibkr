@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import { expect, test } from '@playwright/test'
+import { expect, type Page, test } from '@playwright/test'
 
 interface AttachedSession {
   readonly id: string
@@ -49,25 +49,7 @@ function jsonToolResult(result: { content?: unknown; [key: string]: unknown }): 
   return JSON.parse(text.text) as DynamicObject
 }
 
-test('mock mode is unmistakably labelled and renders deterministic market surfaces', async ({
-  page,
-}) => {
-  await page.goto('/', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByText('Simulated Workstation', { exact: true })).toBeVisible()
-  await expect(page.getByText('Simulated session', { exact: true })).toBeVisible()
-  await expect(page.getByText('Local Simulation', { exact: false }).first()).toBeVisible()
-  await expect(page.getByText('199.95', { exact: true }).first()).toBeVisible()
-  await expect(page.getByText('200.05', { exact: true }).first()).toBeVisible()
-  await expect(page.getByText('Level II data unavailable', { exact: false })).toHaveCount(0)
-
-  await page.getByText('Time & Sales', { exact: true }).click()
-  await expect(page.getByText('NASDAQ', { exact: true }).first()).toBeVisible()
-  await expect(
-    page.getByText('IBKR tick-by-tick data is unavailable', { exact: false }),
-  ).toHaveCount(0)
-})
-
-test('MCP performs and reconciles a complete simulated option round trip', async ({ page }) => {
+async function openMockMcp(page: Page) {
   const bootstrapResponse = page.waitForResponse(
     (response) =>
       response.url().endsWith('/mcp-local/browser-session') && response.status() === 201,
@@ -110,11 +92,37 @@ test('MCP performs and reconciles a complete simulated option round trip', async
     expect(result.isError, JSON.stringify(result.content)).not.toBe(true)
     const receipt = jsonToolResult(result)
     expect(receipt).toMatchObject({ operationId: requestId, origin: 'mcp' })
+    if (controlId === 'trading.reversePosition' || controlId === 'trading.cancelOrder')
+      return receipt
     if (typeof receipt.value !== 'object' || receipt.value === null) {
       throw new Error(`${controlId} returned no object value`)
     }
     return receipt.value as DynamicObject
   }
+
+  return { client, call }
+}
+
+test('mock mode is unmistakably labelled and renders deterministic market surfaces', async ({
+  page,
+}) => {
+  await page.goto('/', { waitUntil: 'domcontentloaded' })
+  await expect(page.getByText('Simulated Workstation', { exact: true })).toBeVisible()
+  await expect(page.getByText('Simulated session', { exact: true })).toBeVisible()
+  await expect(page.getByText('Local Simulation', { exact: false }).first()).toBeVisible()
+  await expect(page.getByText('199.95', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('200.05', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('Level II data unavailable', { exact: false })).toHaveCount(0)
+
+  await page.getByText('Time & Sales', { exact: true }).click()
+  await expect(page.getByText('NASDAQ', { exact: true }).first()).toBeVisible()
+  await expect(
+    page.getByText('IBKR tick-by-tick data is unavailable', { exact: false }),
+  ).toHaveCount(0)
+})
+
+test('MCP performs and reconciles a complete simulated option round trip', async ({ page }) => {
+  const { client, call } = await openMockMcp(page)
 
   try {
     const initial = await call('trading.getState', [])
@@ -133,16 +141,29 @@ test('MCP performs and reconciles a complete simulated option round trip', async
       type: 'stock' as const,
       provider: 'LOCAL-MOCK',
     }
-    const contract = {
+    const contractRequest = {
       underlying: 'AAPL',
       underlyingSymbolInfo: symbol,
       expiration: '2026-10-16',
       strike: 200,
-      right: 'call',
+      right: 'call' as const,
       multiplier: 100,
       exchange: 'SMART',
       currency: 'USD',
       symbol: 'AAPL-2026-10-16-C-200',
+    }
+    const resolved = await call('trading.resolveOptionContract', [
+      { contract: contractRequest, accountId: 'MOCK-PAPER' },
+    ])
+    expect(resolved.tradable).toBe(true)
+    const contract = resolved.contract
+    if (
+      typeof contract !== 'object' ||
+      contract === null ||
+      !('symbol' in contract) ||
+      typeof contract.symbol !== 'string'
+    ) {
+      throw new Error('The simulated provider returned no resolved option contract')
     }
     const context = {
       accountId: 'MOCK-PAPER',
@@ -206,6 +227,171 @@ test('MCP performs and reconciles a complete simulated option round trip', async
       },
     })
     expect(closed.accounts?.[0]?.balance).toMatchObject({ cash: 100_048, equity: 100_048 })
+  } finally {
+    await client.close()
+  }
+})
+
+test('MCP activates linked protection, fills a target and cancels its exact sibling', async ({
+  page,
+}) => {
+  const { client, call } = await openMockMcp(page)
+  try {
+    const symbol = {
+      ticker: 'AAPL',
+      canonicalSymbol: 'mock:AAPL',
+      brokerSymbol: 'AAPL',
+      currency: 'USD',
+      type: 'stock',
+      provider: 'LOCAL-MOCK',
+    }
+    const context = { symbol, accountId: 'MOCK-PAPER', lastPrice: 200, bid: 199.95, ask: 200.05 }
+    const draft = {
+      symbol,
+      accountId: 'MOCK-PAPER',
+      side: 'buy',
+      type: 'market',
+      quantity: 2,
+      exits: {
+        levels: [
+          {
+            id: 'rendered-bracket',
+            quantity: 2,
+            takeProfit: { price: 210 },
+            stopLoss: { kind: 'fixed', triggerPrice: 190 },
+          },
+        ],
+      },
+    }
+    const preview = await call('trading.previewOrder', [draft, context])
+    expect(preview.accepted).toBe(true)
+    const placed = await call(
+      'trading.placeOrder',
+      [{ ...draft, confirmId: preview.confirmId }, context],
+      true,
+    )
+    const parent = placed.order as DynamicObject
+    const opened = await call('trading.getState', [])
+    const children = (opened.orders as DynamicObject[]).filter(
+      (order) => order.parentId === parent.id,
+    )
+    expect(children).toHaveLength(2)
+    const target = children.find((order) => order.type === 'limit')
+    const stop = children.find((order) => order.type === 'stop')
+    expect(target).toMatchObject({ status: 'working', quantity: 2, parentType: 'order' })
+    expect(stop).toMatchObject({ status: 'working', quantity: 2 })
+    if (typeof target?.id !== 'string') throw new Error('Missing exact synthetic target')
+    const amended = await call('trading.previewModifyOrder', [
+      target.id,
+      { price: 199.95 },
+      context,
+    ])
+    expect(amended.accepted).toBe(true)
+    await call(
+      'trading.modifyOrder',
+      [target.id, { price: 199.95 }, context, { confirmId: amended.confirmId }],
+      true,
+    )
+    const closed = await call('trading.getState', [])
+    expect(closed.positions).toEqual([])
+    expect(closed.executions).toHaveLength(2)
+    expect((closed.orders as DynamicObject[]).find((order) => order.id === stop?.id)).toMatchObject(
+      { status: 'cancelled' },
+    )
+    await expect(page.getByText('Simulated session', { exact: true })).toBeVisible()
+  } finally {
+    await client.close()
+  }
+})
+
+test('MCP reverses the exact registered option without trading its underlying stock', async ({
+  page,
+}) => {
+  const { client, call } = await openMockMcp(page)
+  try {
+    const symbol = {
+      ticker: 'AAPL',
+      canonicalSymbol: 'mock:AAPL',
+      brokerSymbol: 'AAPL',
+      exchange: 'SMART',
+      currency: 'USD',
+      type: 'stock',
+      provider: 'LOCAL-MOCK',
+    }
+    const resolved = await call('trading.resolveOptionContract', [
+      {
+        accountId: 'MOCK-PAPER',
+        contract: {
+          underlying: 'AAPL',
+          underlyingSymbolInfo: symbol,
+          expiration: '2026-10-16',
+          strike: 200,
+          right: 'call',
+          multiplier: 100,
+          exchange: 'SMART',
+          currency: 'USD',
+          symbol: 'AAPL-2026-10-16-C-200',
+        },
+      },
+    ])
+    const context = { symbol, accountId: 'MOCK-PAPER', lastPrice: 200, bid: 199.95, ask: 200.05 }
+    const draft = {
+      symbol,
+      accountId: 'MOCK-PAPER',
+      side: 'buy',
+      type: 'market',
+      quantity: 1,
+      optionLegs: [
+        {
+          contract: resolved.contract,
+          side: 'buy',
+          positionEffect: 'open',
+          quantity: 1,
+          ratio: 1,
+          price: 2.5,
+        },
+      ],
+    }
+    const preview = await call('trading.previewOrder', [draft, context])
+    await call('trading.placeOrder', [{ ...draft, confirmId: preview.confirmId }, context], true)
+    const opened = await call('trading.getState', [])
+    const position = opened.positions?.[0]
+    if (typeof position?.id !== 'string') throw new Error('Missing exact synthetic option position')
+    await call(
+      'trading.reversePosition',
+      [position.id, { ...context, symbol: position.symbol }],
+      true,
+    )
+    const reversed = await call('trading.getState', [])
+    expect(reversed.positions).toMatchObject([
+      {
+        side: 'short',
+        quantity: 1,
+        averagePrice: 2.49,
+        symbol: position.symbol,
+        optionContract: {
+          brokerContractId: (resolved.contract as DynamicObject).brokerContractId,
+          multiplier: 100,
+        },
+      },
+    ])
+    expect(reversed.executions).toHaveLength(3)
+    expect(reversed.executions?.slice(1)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          side: 'sell',
+          quantity: 1,
+          price: 2.49,
+          symbol: position.symbol,
+        }),
+      ]),
+    )
+    expect(
+      (reversed.orders as DynamicObject[])
+        .slice(1)
+        .map((order) => (order.optionLegs as DynamicObject[])?.[0]?.positionEffect),
+    ).toEqual(['close', 'open'])
+    await expect(page.getByText('Simulated session', { exact: true })).toBeVisible()
   } finally {
     await client.close()
   }

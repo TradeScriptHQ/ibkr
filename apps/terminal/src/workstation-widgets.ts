@@ -1,7 +1,13 @@
+import type { ChartAuthorizationSnapshot } from '@tradescript/pro/sdk'
 import type { createTerminalTradeScriptSdk } from './terminal-session.js'
-import { WORKSTATION_THEME } from './workstation-theme.js'
 
 export const WORKSTATION_MESSAGE_AUTO_DISMISS_MS = 5_000
+
+const WORKSTATION_TOOLBAR = Object.freeze({
+  drawingToolbarVisible: true,
+  drawingToolbarSize: 'compact',
+  topToolbarSize: 'compact',
+})
 
 export type WorkstationMountOptions = Parameters<
   Awaited<ReturnType<typeof createTerminalTradeScriptSdk>>['tradingTerminal']['mount']
@@ -21,11 +27,10 @@ export const WORKSTATION_WIDGETS: Pick<
   | 'layoutOptions'
 > = {
   interval: '5m',
-  theme: WORKSTATION_THEME,
   panels: {
     orderTicket: true,
     accountPanel: true,
-    accountSummary: true,
+    accountSummary: false,
     watchlist: true,
     depthLadder: true,
     marketDepth: true,
@@ -49,6 +54,7 @@ export const WORKSTATION_WIDGETS: Pick<
   },
   orderTicketOptions: {
     defaultQuantity: 1,
+    orderPreviewMode: 'dialog',
     labels: { commission: 'Entry commission' },
     options: { defaultOrderOptionsExpanded: false },
     messageAutoDismissMs: WORKSTATION_MESSAGE_AUTO_DISMISS_MS,
@@ -64,6 +70,7 @@ export const WORKSTATION_WIDGETS: Pick<
     },
   },
   accountPanelOptions: {
+    showAccountTitle: false,
     defaultPageId: 'positions',
     messageAutoDismissMs: WORKSTATION_MESSAGE_AUTO_DISMISS_MS,
   },
@@ -88,8 +95,30 @@ export const WORKSTATION_WIDGETS: Pick<
       error: 'IBKR tick-by-tick data is unavailable for this session',
     },
   },
-  statusBarOptions: { session: true },
-  chartOptions: { accessibility: { dataTable: true } },
+  statusBarOptions: { session: false },
+  chartOptions: {
+    features: { sessionBadge: false },
+    accessibility: { dataTable: true },
+    initialState: {
+      customization: {
+        toolbar: WORKSTATION_TOOLBAR,
+        chartOverrides: {
+          grid: {
+            show: true,
+            horizontal: { show: true, hairline: true, opacity: 1 },
+            vertical: { show: true, hairline: true, opacity: 1 },
+            verticalMinor: { show: true, hairline: true, opacity: 1 },
+            verticalMajor: { show: true, hairline: true, opacity: 1 },
+          },
+          sessions: {
+            show: true,
+            regular: { opacity: 0 },
+            breakLines: { show: true, size: 1, opacity: 0.13 },
+          },
+        },
+      },
+    },
+  },
   layoutOptions: {
     showAddWidgetAction: true,
     showMaximizeAction: true,
@@ -98,63 +127,41 @@ export const WORKSTATION_WIDGETS: Pick<
   },
 }
 
-export function applyChartAppearance(
-  widget: Parameters<NonNullable<WorkstationMountOptions['onReady']>>[0],
-): void {
-  const customization = widget.customization()
-  const background = {
-    type: 'vertical-gradient' as const,
-    color: 'rgba(7, 17, 27, 0.22)',
-    gradientStartColor: 'rgba(10, 26, 41, 0.22)',
-    gradientEndColor: 'rgba(5, 12, 19, 0.3)',
-  }
-  const grid = {
-    show: true,
-    horizontal: {
-      show: true,
-      color: '#789dbf',
-      hairline: true,
-      opacity: 0.075,
-    },
-    vertical: {
-      show: true,
-      color: '#789dbf',
-      hairline: true,
-      opacity: 0.052,
-    },
-    verticalMinor: {
-      show: true,
-      color: '#789dbf',
-      hairline: true,
-      opacity: 0.028,
-    },
-    verticalMajor: {
-      show: true,
-      color: '#789dbf',
-      hairline: true,
-      opacity: 0.08,
+/** Select host-requested panels from the verified public SDK policy before mounting. */
+export function licensedWorkstationWidgets(
+  policy: Pick<ChartAuthorizationSnapshot['policy'], 'modules'> | undefined,
+): typeof WORKSTATION_WIDGETS {
+  // Only the explicit source development facade has no customer lease authority.
+  if (policy === undefined) return WORKSTATION_WIDGETS
+  const grants = new Set(policy.modules)
+  if (
+    !['terminal', 'chart.core', 'chart.market-data', 'chart'].every((module) => grants.has(module))
+  )
+    throw new Error(
+      'SDK access does not include the workstation chart. Restore SDK access and retry.',
+    )
+  return {
+    ...WORKSTATION_WIDGETS,
+    panels: {
+      orderTicket: grants.has('order-ticket'),
+      accountPanel: grants.has('account-panel'),
+      accountSummary: false,
+      watchlist: grants.has('watchlist'),
+      depthLadder: grants.has('depth-ladder'),
+      marketDepth: grants.has('market-depth'),
+      timeAndSales: grants.has('time-and-sales'),
+      fundamentals: grants.has('fundamentals'),
+      optionChain: grants.has('option-chain'),
+      optionTicket: grants.has('option-ticket'),
+      agentConsole: true,
     },
   }
-  void customization.applyOverrides({
-    chart: { background },
-    grid,
-    sessions: {
-      show: true,
-      premarket: { color: '#244563', opacity: 0.16 },
-      regular: { color: '#07111b', opacity: 0 },
-      afterhours: { color: '#294867', opacity: 0.18 },
-      breakLines: {
-        show: true,
-        color: '#789dbf',
-        opacity: 0.13,
-        size: 1,
-      },
-    },
-  })
-  void customization.applyStyleOverrides({
-    background: {
-      ...background,
-    },
-    grid,
-  })
+}
+
+/** Host the SDK session badge once in the app title bar when the verified policy permits it. */
+export function licensedWorkstationSessionMeta(
+  policy: Pick<ChartAuthorizationSnapshot['policy'], 'modules'> | undefined,
+) {
+  if (policy !== undefined && !policy.modules.includes('session-badge')) return undefined
+  return { variant: 'full' as const, showHotkeySetupButton: false }
 }

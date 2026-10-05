@@ -6,14 +6,6 @@ import type { SetupStatus } from './sdk-authorization.js'
 vi.mock('./connection-settings.js', () => ({
   ConnectionSettingsButton: () => <button type="button">Connection</button>,
 }))
-vi.mock('./legal-notices.js', () => ({
-  LegalNotices: () => (
-    <details>
-      <summary>Licences and data information</summary>
-    </details>
-  ),
-}))
-
 const ready: SetupStatus = {
   sdk: { configured: true, ready: true, state: 'ready', version: '0.1.34' },
   connectionConfigured: true,
@@ -28,13 +20,11 @@ function content(status: SetupStatus, settingsMode = false, replacementRequested
       credentialId=""
       credentialSecret=""
       busy={false}
-      error=""
       statusError=""
       sessionExpired={false}
       onCredentialId={noop}
       onCredentialSecret={noop}
       onActivate={noop}
-      onRetry={noop}
       onReplace={noop}
       onCancelReplacement={noop}
       onRefresh={noop}
@@ -53,8 +43,7 @@ describe('application setup presentation', () => {
     expect(html).toContain('Replace credentials')
     expect(html).toContain('Clear credentials')
     expect(html).not.toMatch(/Welcome|Restore|Connect your broker|<form|<input/u)
-    expect(html).toContain('Licences and data information')
-    expect(html).toContain('separate licences')
+    expect(html).not.toMatch(/Licences and data information|separate licences/u)
     expect(html).toContain('sent to TradeScript only to activate and renew')
   })
 
@@ -71,7 +60,7 @@ describe('application setup presentation', () => {
 
   it('preserves first-run activation and connection steps', () => {
     const html = content({ sdk: { configured: false, ready: false }, connectionConfigured: false })
-    expect(html).toContain('Welcome to TradeScript')
+    expect(html).toContain('Welcome to IBKR Tradescript Terminal')
     expect(html).toContain('Activate your SDK')
     expect(html).toContain('Connect your broker')
     expect(html).toContain(
@@ -81,12 +70,16 @@ describe('application setup presentation', () => {
     expect(html).not.toContain('Cancel replacement')
     expect(html).toContain('Client key')
     expect(html).toContain('Secret')
-    expect(html).not.toMatch(/Log in|Sign in|Buy license|Sync License|console\.tradescript\.dev/u)
+    expect(html).not.toMatch(/Licences and data information|separate licences/u)
+    expect(html).not.toMatch(/Log in|Sign in|Buy license|Sync License/u)
+    expect(html.match(/<a\b[^>]*>.*?<\/a>/gu)).toEqual([
+      '<a href="https://console.tradescript.dev/app/deployments/localhost" target="_blank" rel="noopener noreferrer">Get credentials</a>',
+    ])
   })
 
   it('keeps successful SDK activation visible while broker setup remains incomplete', () => {
     const html = content({ ...ready, connectionConfigured: false })
-    expect(html).toContain('Welcome to TradeScript')
+    expect(html).toContain('Welcome to IBKR Tradescript Terminal')
     expect(html).toContain('SDK authorized')
     expect(html).toContain('SDK credentials saved · Activated')
     expect(html).toContain('Connect your broker')
@@ -99,16 +92,15 @@ describe('application setup presentation', () => {
       sdk: { ...ready.sdk, ready: false, failure: 'rejected', failureReason: 'unauthorized' },
     })
     expect(html).toContain('Restore SDK access')
-    expect(html).toContain('SDK credentials need updating')
+    expect(html).not.toContain('setup-authorization-notice')
     expect(html).toContain('Client key')
     expect(html).toContain('Your broker connection settings and saved workspace are preserved.')
-    expect(html).not.toContain('Welcome to TradeScript')
+    expect(html).not.toContain('Welcome to IBKR Tradescript Terminal')
   })
 
   it('keeps saved credentials during a network recovery instead of asking for replacement', () => {
     const html = content({ ...ready, sdk: { ...ready.sdk, ready: false, failure: 'unavailable' } })
     expect(html).toContain('Restore SDK access')
-    expect(html).toContain('Retry authorization')
     expect(html).toContain('Your existing SDK credentials are saved.')
     expect(html).not.toContain('<input')
   })
@@ -123,8 +115,8 @@ describe('application setup presentation', () => {
         failureReason: 'subscription_access_expired',
       },
     })
-    expect(html).toContain('Subscription access has ended')
-    expect(html).not.toMatch(/console\.tradescript\.dev|Buy license|Log in|Sync License/u)
+    expect(html).not.toMatch(/Buy license|Log in|Sync License/u)
+    expect(html).toContain('Get credentials')
     expect(html).toContain('Restore subscription access')
     expect(html).not.toContain('<input')
   })

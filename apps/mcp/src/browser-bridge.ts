@@ -13,9 +13,26 @@ interface AttachedSession {
 
 interface PendingRequest {
   readonly socket: WebSocket
+  readonly method: string
+  readonly operationIds: readonly string[]
   readonly resolve: (value: unknown) => void
   readonly reject: (error: Error) => void
   readonly timeout: NodeJS.Timeout
+}
+
+const BATCH_BUDGET_MS = 120_000
+const BATCH_RESPONSE_GRACE_MS = 15_000
+
+function unansweredError(reason: string, method: string, operationIds: readonly string[]): Error {
+  if (method === 'call' || method === 'batch') {
+    return Object.assign(
+      new Error(
+        `${reason}. The operation outcome is unknown; reconcile receipts and actual trading state before retrying. Operation IDs: ${operationIds.join(', ')}`,
+      ),
+      { code: 'BRIDGE_OUTCOME_UNKNOWN' },
+    )
+  }
+  return Object.assign(new Error(reason), { code: 'BRIDGE_REQUEST_ABANDONED' })
 }
 
 /** Owns pairing and every request's exact browser socket, independent of MCP transports. */
@@ -123,26 +140,69 @@ export class BrowserBridge {
       })
     }
     const id = randomUUID()
+    const timeoutMs =
+      method === 'batch' ? BATCH_BUDGET_MS + BATCH_RESPONSE_GRACE_MS : this.requestTimeoutMs
+    const executionBudgetMs =
+      method === 'batch'
+        ? BATCH_BUDGET_MS
+        : Math.max(1, timeoutMs - Math.min(1_000, timeoutMs / 10))
+    const operationIds: string[] = []
+    let delegatedParams = params
+    if (params !== null && typeof params === 'object' && !Array.isArray(params)) {
+      if (method === 'call') {
+        const operationId =
+          'requestId' in params && typeof params.requestId === 'string' ? params.requestId : id
+        operationIds.push(operationId)
+        delegatedParams = { ...params, requestId: operationId }
+      } else if (method === 'batch' && 'calls' in params && Array.isArray(params.calls)) {
+        delegatedParams = {
+          ...params,
+          calls: params.calls.map((call: unknown, index: number) => {
+            if (call === null || typeof call !== 'object' || Array.isArray(call)) return call
+            const operationId =
+              'requestId' in call && typeof call.requestId === 'string'
+                ? call.requestId
+                : `${id}:${index}`
+            operationIds.push(operationId)
+            return { ...call, requestId: operationId }
+          }),
+        }
+      }
+      if (delegatedParams !== null && typeof delegatedParams === 'object') {
+        delegatedParams = { ...delegatedParams, deadlineAt: Date.now() + executionBudgetMs }
+      }
+    }
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id)
+        const reason = `TradeScript browser request ${method} timed out`
         reject(
-          Object.assign(new Error(`TradeScript browser request ${method} timed out`), {
-            code: 'BRIDGE_REQUEST_TIMEOUT',
-          }),
+          method === 'call' || method === 'batch'
+            ? unansweredError(reason, method, operationIds)
+            : Object.assign(new Error(reason), { code: 'BRIDGE_REQUEST_TIMEOUT' }),
         )
-      }, this.requestTimeoutMs)
+      }, timeoutMs)
       timeout.unref()
-      this.pending.set(id, { socket: session.socket, resolve, reject, timeout })
+      this.pending.set(id, {
+        socket: session.socket,
+        method,
+        operationIds,
+        resolve,
+        reject,
+        timeout,
+      })
       const fail = (error: Error) => {
         clearTimeout(timeout)
         this.pending.delete(id)
         reject(error)
       }
       try {
-        session.socket.send(JSON.stringify({ type: 'request', id, method, params }), (error) => {
-          if (error) fail(error)
-        })
+        session.socket.send(
+          JSON.stringify({ type: 'request', id, method, params: delegatedParams }),
+          (error) => {
+            if (error) fail(unansweredError(error.message, method, operationIds))
+          },
+        )
       } catch (error) {
         fail(error instanceof Error ? error : new Error(String(error)))
       }
@@ -154,7 +214,7 @@ export class BrowserBridge {
       if (socket && pending.socket !== socket) continue
       this.pending.delete(id)
       clearTimeout(pending.timeout)
-      pending.reject(Object.assign(new Error(reason), { code: 'BRIDGE_REQUEST_ABANDONED' }))
+      pending.reject(unansweredError(reason, pending.method, pending.operationIds))
     }
   }
 

@@ -4,11 +4,15 @@ import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 
 const workspace = fileURLToPath(new URL('../../..', import.meta.url))
 const children: ChildProcess[] = []
+// Each integration test starts a fresh Node process. Budget startup separately
+// from bridge actions so loaded hosts can become ready while failures stay bounded.
+const STARTUP_TIMEOUT = 45_000
+vi.setConfig({ testTimeout: STARTUP_TIMEOUT + 15_000 })
 
 async function availablePort(): Promise<number> {
   const server = createServer()
@@ -22,7 +26,7 @@ async function availablePort(): Promise<number> {
 }
 
 async function waitFor(url: string): Promise<void> {
-  const deadline = Date.now() + 10_000
+  const deadline = Date.now() + STARTUP_TIMEOUT
   while (Date.now() < deadline) {
     try {
       const response = await fetch(url)

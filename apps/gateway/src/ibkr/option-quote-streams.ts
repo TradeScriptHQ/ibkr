@@ -35,6 +35,7 @@ export class OptionQuoteStreams {
   private readQueue: Promise<unknown> = Promise.resolve()
   private readonly listeners = new Set<(key: string) => void>()
   private readonly retainCounts = new Map<string, number>()
+  private retainGeneration = 0
 
   /** Keep a requested window alive until its initial quotes can be returned. */
   readManyReady(contracts: readonly Contract[]): Promise<OptionStreamQuote[]> {
@@ -81,6 +82,7 @@ export class OptionQuoteStreams {
 
   /** Retain an exact quote window and push every matching TWS tick until released. */
   subscribeMany(contracts: readonly Contract[], listener: OptionStreamListener): () => void {
+    const generation = this.retainGeneration
     const uniqueContracts = new Map(contracts.map((contract) => [this.key(contract), contract]))
     for (const [key, contract] of uniqueContracts) {
       this.read(contract)
@@ -97,6 +99,7 @@ export class OptionQuoteStreams {
       if (closed) return
       closed = true
       this.listeners.delete(changed)
+      if (generation !== this.retainGeneration) return
       for (const key of uniqueContracts.keys()) {
         const count = this.retainCounts.get(key) ?? 0
         if (count <= 1) {
@@ -238,11 +241,32 @@ export class OptionQuoteStreams {
   clear(): void {
     for (const key of this.entries.keys()) this.remove(key)
     this.retainCounts.clear()
+    this.retainGeneration += 1
+  }
+
+  /** Keep only explicit stream owners while the broker connection is unavailable. */
+  suspend(cancelActive = false): void {
+    for (const [key, entry] of this.entries) {
+      if (cancelActive && this.byRequest.has(entry.reqId)) this.cancel(entry.reqId)
+      clearTimeout(entry.timeout)
+      if (!this.retainCounts.has(key)) {
+        this.entries.delete(key)
+        continue
+      }
+      entry.quote = {}
+      entry.pendingBidPrice = undefined
+      entry.pendingAskPrice = undefined
+      entry.bidSize = undefined
+      entry.askSize = undefined
+      this.emit(key)
+    }
+    this.byRequest.clear()
   }
 
   restore(): void {
     for (const [key, entry] of this.entries) {
       clearTimeout(entry.timeout)
+      if (this.byRequest.has(entry.reqId)) this.cancel(entry.reqId)
       this.byRequest.delete(entry.reqId)
       const reqId = this.allocate()
       const restored: Entry = {

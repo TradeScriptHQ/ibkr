@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
+import { TERMINAL_ORIGIN } from './e2e/support/terminal-origin.js'
 
 export default defineConfig({
   testDir: './e2e',
@@ -13,7 +14,7 @@ export default defineConfig({
   grepInvert: /@paper/u,
   reporter: [['line'], ['html', { open: 'never' }]],
   use: {
-    baseURL: 'http://localhost:3000',
+    baseURL: TERMINAL_ORIGIN,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',

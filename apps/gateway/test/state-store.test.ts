@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { BrokerStateStore } from '../src/ibkr/state-store.js'
-import type { Order } from '../src/ibkr/types.js'
+import type { Execution, Order } from '../src/ibkr/types.js'
 
 function order(status: Order['status']): Order {
   return {
@@ -39,4 +39,71 @@ describe('broker state order lifecycle', () => {
     expect(store.getState().orders.map((item) => item.id)).toEqual(['qualification-order'])
     expect(store.getState().ordersHistory?.map((item) => item.id)).toEqual(['filled-order'])
   })
+})
+
+const execution: Execution = {
+  id: 'synthetic-fill.01.01',
+  accountId: 'DU123',
+  orderId: '1400',
+  symbol: { symbol: 'AAPL', assetClass: 'stock', exchange: 'SMART', currency: 'USD' },
+  side: 'buy',
+  quantity: 1,
+  price: 150,
+  timestamp: '2026-09-30T14:30:00.000Z',
+}
+
+describe('execution replay timestamps', () => {
+  it.each(['', 'invalid'])(
+    'keeps a known broker time on exact-ID replay with %j time',
+    (timestamp) => {
+      const store = new BrokerStateStore()
+      store.upsertExecution(execution)
+      store.upsertExecution({ ...execution, timestamp, price: 151 })
+      expect(store.getState().executions).toEqual([{ ...execution, price: 151 }])
+    },
+  )
+
+  it('retains the known fill time when a corrected revision has no parseable broker time', () => {
+    const store = new BrokerStateStore()
+    store.setExecutions([
+      execution,
+      { ...execution, id: 'synthetic-fill.01.02', timestamp: '', price: 152 },
+    ])
+    expect(store.getState().executions).toEqual([
+      { ...execution, id: 'synthetic-fill.01.02', price: 152 },
+    ])
+  })
+
+  it('does not let a stale revision change corrected fields or timestamp', () => {
+    const store = new BrokerStateStore()
+    const corrected = { ...execution, id: 'synthetic-fill.01.02', price: 152 }
+    store.upsertExecution(corrected)
+    expect(store.upsertExecution({ ...execution, timestamp: '2026-09-30T15:00:00.000Z' })).toBe(
+      false,
+    )
+    expect(store.getState().executions).toEqual([corrected])
+  })
+
+  it('accepts a known corrected broker timestamp in place of an unknown earlier timestamp', () => {
+    const store = new BrokerStateStore()
+    store.upsertExecution({ ...execution, timestamp: '' })
+    const corrected = {
+      ...execution,
+      id: 'synthetic-fill.01.02',
+      timestamp: '2026-09-30T14:31:00.000Z',
+    }
+    store.upsertExecution(corrected)
+    expect(store.getState().executions).toEqual([corrected])
+  })
+
+  it.each([{ accountId: 'DU999' }, { orderId: '1401' }])(
+    'never borrows a timestamp across a different execution owner %j',
+    (owner) => {
+      const store = new BrokerStateStore()
+      store.upsertExecution(execution)
+      const unrelated = { ...execution, ...owner, id: 'synthetic-fill.01.02', timestamp: '' }
+      store.upsertExecution(unrelated)
+      expect(store.getState().executions).toEqual([execution, unrelated])
+    },
+  )
 })

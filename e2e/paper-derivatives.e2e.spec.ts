@@ -2,6 +2,7 @@ import type { MarketSessionInfo, OptionChainResult } from '@ibkr-terminal/contra
 import type { TradingOrderDraft } from '@tradescript/pro/sdk'
 import { expect, test } from './support/fixtures.js'
 import { descriptor, discover, queryFor, select } from './support/instrument-contracts.js'
+import { readExplicitOptionCatalog, toNativeSdkOptionContract } from './support/option-catalog.js'
 import {
   accepted,
   cleanUp,
@@ -35,51 +36,49 @@ for (const instrument of [
     multiplier: 5,
   },
 ]) {
-  test(`${instrument.root} options: native chain keeps the exact underlying and option contract`, async ({
+  test(`${instrument.root} options: native API keeps the exact underlying and option contract`, async ({
     page,
     request,
   }) => {
     const selected = (
       await discover(request, instrument.root, instrument.assetClass, instrument.exchange)
-    )[0]!
+    )[0]
+    if (!selected?.brokerSymbol || !selected.currency)
+      throw new Error('TWS omitted the exact derivative underlying identity.')
     const query = new URLSearchParams({
-      underlying: selected.brokerSymbol!,
+      underlying: selected.brokerSymbol,
       underlyingAssetClass: instrument.assetClass,
       underlyingExchange: instrument.exchange,
-      currency: selected.currency!,
-      maxQuoteContracts: '4',
+      currency: selected.currency,
+      maxQuoteContracts: '2',
+      quoteWindowRows: '2',
     })
-    const chain = await expectJsonOk<OptionChainResult>(
-      await request.get(`/api/v1/ibkr/options/chain?${query}`, {
-        headers: browserHeaders,
-        timeout: 90_000,
-      }),
-    )
-    const contracts = chain.expirations.flatMap((expiry) => expiry.contracts)
-    expect(contracts.length).toBeGreaterThan(0)
-    const first = contracts[0]!.contract
+    const { candidate, legacyAmbiguous } = await readExplicitOptionCatalog(request, query)
+    const first = candidate.contract
+    test.info().annotations.push({
+      type: 'option-api-boundary',
+      description: `Exact native API catalog inspected; legacy class ambiguity: ${legacyAmbiguous}. Underlying selection is a smoke check; installed SDK option-class selection/rendering remains unqualified under H13.`,
+    })
     expect(first.underlyingSymbolInfo.assetClass).toBe(instrument.assetClass)
     expect(first.underlyingSymbolInfo.canonicalSymbol).toBe(selected.canonicalSymbol)
     expect(first.multiplier).toBe(instrument.multiplier)
     expect(first.priceStep).toBeGreaterThan(0)
+    if (!first.exchange) throw new Error('TWS omitted the native option exchange.')
     const native = await expectJsonOk<
       Array<{ symbol: { contractIdentity: { securityType: string; conId: number } } }>
     >(
       await request.get(
-        `/api/v1/ibkr/contracts?${new URLSearchParams({ symbol: instrument.root, securityType: instrument.securityType, exchange: first.exchange!, conId: String(first.brokerContractId) })}`,
+        `/api/v1/ibkr/contracts?${new URLSearchParams({ symbol: instrument.root, securityType: instrument.securityType, exchange: first.exchange, conId: String(first.brokerContractId) })}`,
         { headers: browserHeaders },
       ),
     )
     expect(native[0]?.symbol.contractIdentity).toMatchObject({
       securityType: instrument.securityType,
-      conId: first.brokerContractId,
+      conId: Number(first.brokerContractId),
+      tradingClass: first.tradingClass,
+      multiplier: first.multiplier,
     })
     await select(page, instrument.root, instrument.label, selected)
-    await page.getByRole('tab', { name: /Options Chain/ }).click()
-    const panel = page.getByRole('tabpanel', { name: /Options Chain/ })
-    await expect(panel.getByText('Calls', { exact: true })).toBeVisible({ timeout: 90_000 })
-    await expect(panel.getByText('Puts', { exact: true })).toBeVisible()
-    await expect(panel).toContainText(selected.name ?? selected.ticker)
   })
 }
 
@@ -116,6 +115,14 @@ for (const instrument of [
         currency: selected.currency!,
         maxQuoteContracts: '16',
         quoteWindowRows: '8',
+      })
+      const { selection } = await readExplicitOptionCatalog(request, query)
+      query.set('tradingClass', selection.tradingClass)
+      query.set('expiration', selection.expiration)
+      test.info().annotations.push({
+        type: 'option-api-boundary',
+        description:
+          'Programmatic SDK draft preserves a provider-qualified native ID and tuple; installed SDK widget class selection/rendering remains unqualified under H13.',
       })
       let entries: OptionChainResult['expirations'][number]['contracts'] = []
       await expect
@@ -158,20 +165,7 @@ for (const instrument of [
         ...(flow === 'execution' ? {} : { price }),
         optionLegs: [
           {
-            contract: {
-              underlying: contract.underlying,
-              underlyingSymbolInfo: symbol,
-              expiration: contract.expiration,
-              strike: contract.strike,
-              right: contract.right,
-              multiplier: contract.multiplier,
-              brokerContractId: contract.brokerContractId,
-              priceStep: contract.priceStep,
-              ...(contract.exchange === undefined ? {} : { exchange: contract.exchange }),
-              ...(contract.route === undefined ? {} : { route: contract.route }),
-              ...(contract.currency === undefined ? {} : { currency: contract.currency }),
-              ...(contract.symbol === undefined ? {} : { symbol: contract.symbol }),
-            },
+            contract: toNativeSdkOptionContract(selectedOption, symbol),
             side: 'buy',
             positionEffect: 'open',
             quantity: 1,

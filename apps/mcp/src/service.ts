@@ -13,18 +13,43 @@ export interface McpServiceOptions {
 
 export async function startMcpService(options: McpServiceOptions) {
   const host = '127.0.0.1'
+  const uiOrigin = new URL(options.uiOrigin).origin
+  const uiHost = new URL(uiOrigin).host
+  const httpHosts = [`${host}:${options.httpPort}`, `localhost:${options.httpPort}`]
+  const bridgeHosts = [`${host}:${options.bridgePort}`, `localhost:${options.bridgePort}`]
+  const hasProxyCapability = (value: string | string[] | undefined) =>
+    typeof value === 'string' && safeEqual(value, options.capability)
   const bridge = new BrowserBridge()
-  const transport = createMcpTransport(bridge)
+  const transport = createMcpTransport(bridge, {
+    allowedHosts: [...httpHosts, uiHost],
+    allowedOrigins: [uiOrigin],
+  })
   const httpServer = createServer((request, response) => {
     void (async () => {
+      // Native clients use the service's own loopback address. The same-origin terminal proxy
+      // preserves the UI Host, so that distinct authority also requires its private capability.
+      const requestHost = request.headers.host?.toLowerCase()
+      const trustedHost =
+        requestHost !== undefined &&
+        (httpHosts.includes(requestHost) ||
+          (requestHost === uiHost &&
+            hasProxyCapability(request.headers['x-terminal-proxy-capability'])))
+      if (
+        !trustedHost ||
+        (request.headers.origin !== undefined && request.headers.origin !== uiOrigin)
+      ) {
+        sendJson(response, 403, {
+          error: { code: 'FORBIDDEN', message: 'The local MCP request authority is not allowed' },
+        })
+        return
+      }
       const url = new URL(request.url ?? '/', `http://${host}:${options.httpPort}`)
       if (url.pathname === '/healthz' && request.method === 'GET') {
         sendJson(response, 200, { status: 'ok', attachedSessions: bridge.sessions().length })
       } else if (url.pathname === '/sessions' && request.method === 'GET') {
         sendJson(response, 200, bridge.sessions())
       } else if (url.pathname === '/browser-session' && request.method === 'POST') {
-        const capability = request.headers['x-terminal-proxy-capability']
-        if (typeof capability !== 'string' || !safeEqual(capability, options.capability)) {
+        if (!hasProxyCapability(request.headers['x-terminal-proxy-capability'])) {
           sendJson(response, 403, {
             error: { code: 'FORBIDDEN', message: 'The terminal proxy capability is required' },
           })
@@ -52,8 +77,17 @@ export async function startMcpService(options: McpServiceOptions) {
   const bridgeServer = createServer()
   const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_BODY_BYTES })
   bridgeServer.on('upgrade', (request, socket, head) => {
-    const url = new URL(request.url ?? '/', `http://${host}:${options.bridgePort}`)
-    if (url.pathname !== '/bridge' || request.headers.origin !== options.uiOrigin) {
+    let permitted = false
+    try {
+      const url = new URL(request.url ?? '/', `http://${host}:${options.bridgePort}`)
+      permitted =
+        url.pathname === '/bridge' &&
+        bridgeHosts.includes(request.headers.host?.toLowerCase() ?? '') &&
+        request.headers.origin === uiOrigin
+    } catch {
+      // A malformed upgrade target must reject this connection without escaping the listener.
+    }
+    if (!permitted) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
       return
     }

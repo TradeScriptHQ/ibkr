@@ -46,8 +46,11 @@ export async function startGatewayService() {
   const connections = new ConnectionManager(
     initialConfig,
     (config) =>
-      createBrokerRuntime(config, () =>
-        events.publish({ type: 'readiness.changed', status: getStatus() }),
+      createBrokerRuntime(
+        config,
+        () => events.publish({ type: 'readiness.changed', status: getStatus() }),
+        undefined,
+        join(stateDirectory, 'paper-ownership'),
       ),
     join(stateDirectory, 'connections.json'),
   )
@@ -119,6 +122,10 @@ export async function startGatewayService() {
       return connections.runtime.brokerStore
     },
     database,
+    onAuditUnavailable() {
+      runtime.auditDatabaseReady = false
+      events.publish({ type: 'readiness.changed', status: getStatus() })
+    },
   })
 
   let closing: Promise<void> | undefined

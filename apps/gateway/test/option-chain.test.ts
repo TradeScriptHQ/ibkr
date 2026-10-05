@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { type Contract, EventName, type IBApi, SecType } from '@stoqey/ib'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadGatewayConfig } from '../src/config.js'
 import { createBridgeConfig } from '../src/ibkr/config.js'
 import { IbkrService } from '../src/ibkr/ibkr-service.js'
@@ -8,12 +8,23 @@ import { BrokerStateStore } from '../src/ibkr/state-store.js'
 
 function fixture(
   last = 316.22,
-  options: { expirations?: string[]; validStrikes?: (expiration: string) => number[] } = {},
+  options: {
+    expirations?: string[]
+    validStrikes?: (expiration: string) => number[]
+    tradingClasses?: string[]
+    marketRuleIds?: string
+  } = {},
 ) {
   const store = new BrokerStateStore()
   store.setConnectionStatus('connected')
   store.upsertQuote({
-    symbol: { symbol: 'AAPL', exchange: 'NASDAQ', currency: 'USD', assetClass: 'stock' },
+    symbol: {
+      symbol: 'AAPL',
+      exchange: 'SMART',
+      primaryExchange: 'NASDAQ',
+      currency: 'USD',
+      assetClass: 'stock',
+    },
     last,
     status: 'delayed',
     timestamp: new Date().toISOString(),
@@ -45,6 +56,7 @@ function fixture(
     requestSecDefOptParams: () => Promise<unknown[]>
   }
   const strikes = Array.from({ length: 81 }, (_, i) => 200 + i * 2.5)
+  const tradingClasses = options.tradingClasses ?? ['AAPL']
   const expirations = options.expirations ?? ['20260909']
   const requestContractDetails = vi
     .spyOn(boundary, 'requestContractDetails')
@@ -57,6 +69,7 @@ function fixture(
               symbol: 'AAPL',
               secType: SecType.STK,
               exchange: 'SMART',
+              primaryExch: 'NASDAQ',
               currency: 'USD',
             },
           },
@@ -68,14 +81,14 @@ function fixture(
         (['C', 'P'] as const).map((right) => ({
           minTick: 0.005,
           validExchanges: 'SMART,CBOE',
-          marketRuleIds: '26,26',
+          marketRuleIds: options.marketRuleIds ?? '26,26',
           contract: {
             conId: Number(
-              `${expiration.slice(-4)}${Math.round(strike * 10)}${right === 'P' ? 1 : 0}`,
+              `${tradingClasses.indexOf(String(contract.tradingClass)) + 1}${expiration.slice(-4)}${Math.round(strike * 10)}${right === 'P' ? 1 : 0}`,
             ),
             symbol: 'AAPL',
             localSymbol: `AAPL ${expiration} ${right} ${strike}`,
-            tradingClass: 'AAPL',
+            tradingClass: contract.tradingClass,
             secType: SecType.OPT,
             lastTradeDateOrContractMonth: expiration,
             strike,
@@ -102,6 +115,15 @@ function fixture(
       expirations,
       strikes,
     },
+    ...tradingClasses
+      .filter((id) => id !== 'AAPL')
+      .map((tradingClass) => ({
+        exchange: 'SMART',
+        tradingClass,
+        multiplier: '100',
+        expirations,
+        strikes,
+      })),
   ])
   return {
     service,
@@ -295,6 +317,8 @@ describe('option strike catalog and quote budget', () => {
   })
 
   it('returns all IBKR expirations while qualifying only the nearest initial catalog', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-09-08T12:00:00Z'))
     const { service, requestContractDetails, reqMktData } = fixture(316.22, {
       expirations: ['20260909', '20260911', '20260918'],
     })
@@ -310,5 +334,156 @@ describe('option strike catalog and quote budget', () => {
     expect(
       requestContractDetails.mock.calls.filter(([contract]) => contract.secType === SecType.OPT),
     ).toHaveLength(1)
+    vi.useRealTimers()
   })
+})
+
+describe('date-only option catalog defaults', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-01T12:00:00Z'))
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('retains provider history but qualifies only the earliest strictly future default', async () => {
+    const { service, requestContractDetails, reqMktData } = fixture(316.22, {
+      expirations: ['20261007', '20260930', '20261001', '20261002'],
+    })
+    const chain = await service.getOptionChain({ underlying: 'AAPL' })
+    expect(chain.expirations.map((item) => item.expiration)).toEqual([
+      '2026-09-30',
+      '2026-10-01',
+      '2026-10-02',
+      '2026-10-07',
+    ])
+    expect(
+      chain.expirations.filter((item) => item.contracts.length).map((item) => item.expiration),
+    ).toEqual(['2026-10-02'])
+    expect(
+      requestContractDetails.mock.calls
+        .filter(([contract]) => contract.secType === SecType.OPT)
+        .map(([contract]) => contract.lastTradeDateOrContractMonth),
+    ).toEqual(['20261002'])
+    expect(reqMktData).not.toHaveBeenCalled()
+  })
+
+  it('does not qualify or subscribe a default when every date is past or same-day without a deadline', async () => {
+    const { service, requestContractDetails, reqMktData } = fixture(316.22, {
+      expirations: ['20260930', '20261001'],
+    })
+    const chain = await service.getOptionChain({ underlying: 'AAPL' })
+    expect(chain.expirations.map((item) => item.expiration)).toEqual(['2026-09-30', '2026-10-01'])
+    expect(chain.expirations.every((item) => item.contracts.length === 0)).toBe(true)
+    expect(
+      requestContractDetails.mock.calls.filter(([contract]) => contract.secType === SecType.OPT),
+    ).toHaveLength(0)
+    expect(reqMktData).not.toHaveBeenCalled()
+  })
+
+  it('keeps a provider-listed historical expiry available when explicitly requested', async () => {
+    const { service, requestContractDetails } = fixture(316.22, {
+      expirations: ['20260930', '20261007'],
+    })
+    const chain = await service.getOptionChain({ underlying: 'AAPL', expirations: ['2026-09-30'] })
+    expect(chain.expirations).toHaveLength(1)
+    expect(chain.expirations[0].contracts.length).toBeGreaterThan(0)
+    expect(
+      requestContractDetails.mock.calls
+        .filter(([contract]) => contract.secType === SecType.OPT)
+        .map(([contract]) => contract.lastTradeDateOrContractMonth),
+    ).toEqual(['20260930'])
+  })
+
+  it('reevaluates the automatic catalog across UTC midnight even inside the cache lifetime', async () => {
+    vi.setSystemTime(new Date('2026-10-01T23:59:00Z'))
+    const { service, requestContractDetails } = fixture(316.22, {
+      expirations: ['20261002', '20261007'],
+    })
+    const first = await service.getOptionChain({ underlying: 'AAPL' })
+    expect(
+      first.expirations.filter((item) => item.contracts.length).map((item) => item.expiration),
+    ).toEqual(['2026-10-02'])
+    requestContractDetails.mockClear()
+    vi.setSystemTime(new Date('2026-10-02T00:01:00Z'))
+    const next = await service.getOptionChain({ underlying: 'AAPL' })
+    expect(
+      next.expirations.filter((item) => item.contracts.length).map((item) => item.expiration),
+    ).toEqual(['2026-10-07'])
+    expect(
+      requestContractDetails.mock.calls
+        .filter(([contract]) => contract.secType === SecType.OPT)
+        .map(([contract]) => contract.lastTradeDateOrContractMonth),
+    ).toEqual(['20261007'])
+  })
+})
+
+describe('explicit provider option trading classes', () => {
+  it('retains the legacy ambiguity guard and offers discovery without qualifying or quoting an arbitrary class', async () => {
+    const { service, requestContractDetails, reqMktData } = fixture(316.22, {
+      tradingClasses: ['AAPL1', 'AAPL'],
+    })
+    await expect(service.getOptionChain({ underlying: 'AAPL' })).rejects.toThrow(
+      'explicit class selector',
+    )
+    requestContractDetails.mockClear()
+    const discovered = await service.getOptionChain({
+      underlying: 'AAPL',
+      includeTradingClasses: true,
+    })
+    expect(discovered.tradingClasses).toEqual([
+      { id: 'AAPL', exchange: 'SMART', multiplier: 100 },
+      { id: 'AAPL1', exchange: 'SMART', multiplier: 100 },
+    ])
+    expect(discovered.expirations).toEqual([])
+    expect(
+      requestContractDetails.mock.calls.every(([query]) => query.secType === SecType.STK),
+    ).toBe(true)
+    expect(reqMktData).not.toHaveBeenCalled()
+  })
+
+  it('qualifies and quotes only the explicitly selected native class, preserving distinct conIds for identical option tuples', async () => {
+    const { service, requestContractDetails, reqMktData } = fixture(316.22, {
+      tradingClasses: ['AAPL', 'AAPL1'],
+    })
+    const standard = await service.getOptionChain({
+      ...request,
+      includeTradingClasses: true,
+      tradingClass: 'AAPL',
+    })
+    requestContractDetails.mockClear()
+    reqMktData.mockClear()
+    const adjusted = await service.getOptionChain({
+      ...request,
+      includeTradingClasses: true,
+      tradingClass: 'AAPL1',
+    })
+    expect(adjusted.tradingClass).toBe('AAPL1')
+    expect(
+      adjusted.expirations[0].contracts.every((row) => row.contract.tradingClass === 'AAPL1'),
+    ).toBe(true)
+    expect(
+      requestContractDetails.mock.calls
+        .filter(([query]) => query.secType === SecType.OPT)
+        .every(([query]) => query.tradingClass === 'AAPL1'),
+    ).toBe(true)
+    expect(reqMktData.mock.calls.every(([, query]) => query.tradingClass === 'AAPL1')).toBe(true)
+    const first = standard.expirations[0].contracts[0].contract
+    const other = adjusted.expirations[0].contracts.find(
+      (row) => row.contract.strike === first.strike && row.contract.right === first.right,
+    )?.contract
+    expect(other?.brokerContractId).not.toBe(first.brokerContractId)
+    await expect(
+      service.getOptionChain({ underlying: 'AAPL', tradingClass: 'NOT_A_CLASS' }),
+    ).rejects.toThrow('option chain parameters')
+  })
+})
+
+it('withholds option price ladders when the selected route has no aligned provider rule', async () => {
+  const { service, reqMarketRule } = fixture(316.22, { marketRuleIds: '26' })
+  const chain = await service.getOptionChain({ ...request, exchange: 'CBOE' })
+  expect(chain.expirations[0].contracts.length).toBeGreaterThan(0)
+  expect(
+    chain.expirations[0].contracts.every((row) => row.contract.priceIncrements === undefined),
+  ).toBe(true)
+  expect(reqMarketRule).not.toHaveBeenCalled()
 })

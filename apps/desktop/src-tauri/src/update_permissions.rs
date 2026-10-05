@@ -54,3 +54,40 @@ fn compiled_update_permissions_only_allow_the_workstation_origin_and_window() {
         }
     }
 }
+
+#[test]
+fn compiled_credentials_page_permission_only_allows_the_workstation_origin_and_window() {
+    let manifests =
+        serde_json::from_str(include_str!("../gen/schemas/acl-manifests.json")).unwrap();
+    let capabilities =
+        serde_json::from_str(include_str!("../gen/schemas/capabilities.json")).unwrap();
+    let resolved = Resolved::resolve(&manifests, capabilities, Target::current()).unwrap();
+    let grants = resolved
+        .allowed_commands
+        .get("open_credentials_page")
+        .expect("the fixed credentials page command is registered");
+    assert!(!grants.is_empty());
+    for grant in grants {
+        assert!(grant.windows.iter().any(|pattern| pattern.matches("main")));
+        assert!(!grant
+            .windows
+            .iter()
+            .any(|pattern| pattern.matches("untrusted")));
+        assert!(grant.webviews.is_empty());
+        let ExecutionContext::Remote { url } = &grant.context else {
+            panic!("the credentials page command must be restricted to the workstation origin");
+        };
+        assert!(url.test(&"http://127.0.0.1:43871/".parse().unwrap()));
+        for rejected in [
+            "http://127.0.0.1:43872/",
+            "http://localhost:43871/",
+            "https://127.0.0.1:43871/",
+            "https://console.tradescript.dev/",
+        ] {
+            assert!(
+                !url.test(&rejected.parse().unwrap()),
+                "unexpected origin: {rejected}"
+            );
+        }
+    }
+}

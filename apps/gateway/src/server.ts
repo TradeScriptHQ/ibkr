@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import cookie from '@fastify/cookie'
 import websocket from '@fastify/websocket'
 import type {
@@ -8,6 +8,8 @@ import type {
   TradeScriptBootstrapResponse,
 } from '@ibkr-terminal/contracts'
 import {
+  ConnectionProfileSchema,
+  ConnectionRetryRequestSchema,
   type ConnectionSettings,
   ConnectionSettingsSchema,
   type ConnectionSnapshot,
@@ -39,6 +41,7 @@ interface GatewayServerOptions {
   >
   readonly connections?: {
     snapshot(): ConnectionSnapshot
+    retryConnection?(generation: string): Promise<ConnectionSnapshot>
     switch(
       settings: ConnectionSettings,
       generation: string,
@@ -49,6 +52,12 @@ interface GatewayServerOptions {
       generation: string,
     ): Promise<{ testId: string; accounts: string[] }>
     execute<T>(generation: string | undefined, execute: () => T | Promise<T>): Promise<T>
+    setAgentTrading?(
+      enabled: boolean,
+      generation: string,
+      limits?: ConnectionSettings['profiles']['paper']['limits'],
+      expectedRevision?: number,
+    ): Promise<ConnectionSnapshot>
   }
   readonly config: GatewayConfig
   readonly proxyCapability: string
@@ -60,6 +69,7 @@ interface GatewayServerOptions {
   readonly ibkr?: IbkrService
   readonly brokerStore?: BrokerStateStore
   readonly database?: Pick<LocalDatabase, 'appendJournal'>
+  readonly onAuditUnavailable?: () => void
 }
 
 function safeEqual(left: string | undefined, right: string): boolean {
@@ -124,11 +134,13 @@ export async function createGatewayServer(options: GatewayServerOptions) {
     logger: false,
     bodyLimit: 32 * 1024,
     requestIdHeader: false,
+    genReqId: () => randomUUID(),
     logController: new LogController({ disableRequestLogging: true }),
   })
   const uiHost = new URL(options.config.ui.origin).host
   const gatewayHost = `${options.config.gateway.host}:${options.config.gateway.port}`
   const activeSockets = new Map<string, Set<{ close(code?: number, reason?: string): void }>>()
+  let auditReady = true
 
   await app.register(cookie)
   await app.register(websocket, {
@@ -245,15 +257,63 @@ export async function createGatewayServer(options: GatewayServerOptions) {
   }
 
   const requireTradingReady = async (request: FastifyRequest, reply: FastifyReply) => {
-    if (!options.getStatus().tradingEnabled) {
+    const status = options.getStatus()
+    if (!auditReady || !status.ready || !status.tradingEnabled) {
       return sendError(
         request,
         reply,
         503,
         'not-ready',
-        'Paper trading remains locked until TWS reconciliation and the account allowlist are ready.',
+        !auditReady
+          ? 'The audit ledger is unavailable; financial actions are blocked.'
+          : `${status.environment} trading remains locked until connection requirements are ready.`,
       )
     }
+  }
+
+  const requireConnectionReady = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!auditReady || !options.getStatus().ready) {
+      return sendError(
+        request,
+        reply,
+        503,
+        'not-ready',
+        'The connection is not ready for broker inspection.',
+      )
+    }
+  }
+
+  const mutationMetadata = (request: FastifyRequest) => {
+    const body = request.body as
+      | {
+          metadata?: { operationId?: string; origin?: string }
+          options?: { operationId?: string; origin?: string }
+        }
+      | undefined
+    if (
+      (body?.metadata?.origin !== undefined &&
+        body.options?.origin !== undefined &&
+        body.metadata.origin !== body.options.origin) ||
+      (body?.metadata?.operationId !== undefined &&
+        body.options?.operationId !== undefined &&
+        body.metadata.operationId !== body.options.operationId)
+    )
+      throw new RequestError(400, 'Conflicting financial operation metadata.')
+    return {
+      origin: body?.metadata?.origin ?? body?.options?.origin,
+      operationId: body?.metadata?.operationId ?? body?.options?.operationId,
+    }
+  }
+
+  const auditUnavailable = () => {
+    if (!auditReady) return
+    auditReady = false
+    try {
+      options.onAuditUnavailable?.()
+    } catch {
+      app.log.error('Audit readiness notification failed.')
+    }
+    app.log.error('Audit ledger write failed; further financial actions are blocked.')
   }
 
   const recordMutation = (
@@ -261,18 +321,17 @@ export async function createGatewayServer(options: GatewayServerOptions) {
     eventType: string,
     outcome: 'attempted' | 'succeeded' | 'failed',
   ) => {
-    const body = request.body as
-      | { metadata?: { operationId?: string; origin?: string } }
-      | undefined
+    const metadata = mutationMetadata(request)
     options.database?.appendJournal({
       category: 'broker-mutation',
       eventType: `${eventType}.${outcome}`,
-      actorType: body?.metadata?.origin === 'mcp' ? 'agent' : 'human',
-      correlationId: body?.metadata?.operationId ?? request.id,
+      actorType:
+        metadata.origin === 'mcp' ? 'agent' : metadata.origin === 'host' ? 'host' : 'human',
+      correlationId: metadata.operationId ?? request.id,
       payload: {
         route: request.routeOptions.url ?? request.url,
         method: request.method,
-        ...(body?.metadata?.origin ? { origin: body.metadata.origin } : {}),
+        ...(metadata.origin ? { origin: metadata.origin } : {}),
       },
     })
   }
@@ -282,26 +341,50 @@ export async function createGatewayServer(options: GatewayServerOptions) {
     eventType: string,
     execute: () => T | Promise<T>,
   ): Promise<T> => {
-    const origin = (request.body as { metadata?: { origin?: string } } | undefined)?.metadata
-      ?.origin
-    if (origin === 'mcp' && !options.config.agents.enabled)
+    const { origin } = mutationMetadata(request)
+    const isTrade = ['order.place', 'order.modify', 'order.cancel', 'position.close'].includes(
+      eventType,
+    )
+    if (isTrade && origin === 'mcp' && !options.config.agents.enabled)
       throw new RequestError(403, 'Agent trading is disabled for this connection.')
-    recordMutation(request, eventType, 'attempted')
+    const executeCurrent = () => {
+      if (isTrade && origin === 'mcp' && !options.config.agents.enabled)
+        throw new RequestError(403, 'Agent trading is disabled for this connection.')
+      return execute()
+    }
     try {
-      const result = await (options.connections
+      recordMutation(request, eventType, 'attempted')
+    } catch {
+      auditUnavailable()
+      throw new RequestError(
+        503,
+        'The audit ledger is unavailable; the broker operation was not sent.',
+      )
+    }
+    let result: T
+    try {
+      result = await (options.connections
         ? options.connections.execute(
             typeof request.headers['x-tradescript-connection'] === 'string'
               ? request.headers['x-tradescript-connection']
               : undefined,
-            execute,
+            executeCurrent,
           )
-        : execute())
-      recordMutation(request, eventType, 'succeeded')
-      return result
+        : executeCurrent())
     } catch (error) {
-      recordMutation(request, eventType, 'failed')
+      try {
+        recordMutation(request, eventType, 'failed')
+      } catch {
+        auditUnavailable()
+      }
       throw error
     }
+    try {
+      recordMutation(request, eventType, 'succeeded')
+    } catch {
+      auditUnavailable()
+    }
+    return result
   }
 
   const setSessionCookie = (reply: FastifyReply, sessionId: string) => {
@@ -332,7 +415,8 @@ export async function createGatewayServer(options: GatewayServerOptions) {
         'Session bootstrap requires the exact browser origin.',
       )
     }
-    const issued = options.sessions.issue()
+    const issued =
+      options.sessions.resume(request.cookies[SESSION_COOKIE_NAME]) ?? options.sessions.issue()
     setSessionCookie(reply, issued.sessionId)
     return { csrfToken: issued.csrfToken, expiresAt: issued.expiresAt }
   })
@@ -454,6 +538,7 @@ export async function createGatewayServer(options: GatewayServerOptions) {
         return options.brokerStore!
       },
       authenticated: { preHandler: requireSession },
+      brokerInspection: { preHandler: [requireSession, requireMutation, requireConnectionReady] },
       financialMutation: { preHandler: [requireSession, requireMutation, requireTradingReady] },
       brokerMutation,
     })
@@ -463,6 +548,52 @@ export async function createGatewayServer(options: GatewayServerOptions) {
   if (connections) {
     app.get('/api/v1/connection', { preHandler: requireSession }, async () =>
       connections.snapshot(),
+    )
+    app.post(
+      '/api/v1/connection/retry',
+      { preHandler: [requireSession, requireMutation] },
+      async (request) => {
+        const parsed = ConnectionRetryRequestSchema.safeParse(request.body)
+        if (!parsed.success) throw new RequestError(400, 'Invalid connection retry.')
+        if (!connections.retryConnection)
+          throw new RequestError(503, 'Connection retries are unavailable.')
+        return connections.retryConnection(parsed.data.generation)
+      },
+    )
+    app.put(
+      '/api/v1/connection/agent-trading',
+      { preHandler: [requireSession, requireMutation] },
+      async (request) => {
+        const body = request.body as
+          | {
+              enabled?: unknown
+              generation?: unknown
+              limits?: unknown
+              expectedAgentTradingRevision?: unknown
+            }
+          | undefined
+        const limits = ConnectionProfileSchema.shape.limits.safeParse(body?.limits)
+        if (
+          typeof body?.enabled !== 'boolean' ||
+          typeof body.generation !== 'string' ||
+          body.generation.length === 0 ||
+          typeof body.expectedAgentTradingRevision !== 'number' ||
+          !Number.isInteger(body.expectedAgentTradingRevision) ||
+          body.expectedAgentTradingRevision < 0 ||
+          !limits.success
+        )
+          throw new RequestError(400, 'Invalid agent trading settings.')
+        if (!connections.setAgentTrading)
+          throw new RequestError(503, 'Agent trading settings are unavailable.')
+        const snapshot = await connections.setAgentTrading(
+          body.enabled,
+          body.generation,
+          limits.data,
+          body.expectedAgentTradingRevision,
+        )
+        options.events.publish({ type: 'readiness.changed', status: options.getStatus() })
+        return snapshot
+      },
     )
     app.post(
       '/api/v1/connection/test',

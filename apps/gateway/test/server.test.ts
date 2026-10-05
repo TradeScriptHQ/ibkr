@@ -1,7 +1,8 @@
-import type { SystemStatusResponse } from '@ibkr-terminal/contracts'
+import type { ConnectionSnapshot, SystemStatusResponse } from '@ibkr-terminal/contracts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { loadGatewayConfig } from '../src/config.js'
 import { EventStream } from '../src/events/event-stream.js'
+import { RequestError } from '../src/ibkr/request-error.js'
 import { SessionStore } from '../src/security/session-store.js'
 import { WebSocketTicketStore } from '../src/security/websocket-tickets.js'
 import { createGatewayServer } from '../src/server.js'
@@ -45,6 +46,277 @@ const browserHeaders = {
   'x-tradescript-client': 'terminal-v1',
 }
 
+const agentLimits = {
+  maxOrderQuantity: 100,
+  maxOrderNotional: 1000,
+  maxPositionQuantity: 100,
+  maxPositionNotional: 1000,
+  maxDailyLoss: 100,
+  maxOrdersPerMinute: 10,
+  maxEstimatedSlippageBps: 10,
+  maxMarketDataAgeMs: 1000,
+  maxLeverage: 2,
+  maxUnprotectedPositionQuantity: 100,
+}
+
+async function authenticatedHeaders(app: Awaited<ReturnType<typeof createGatewayServer>>) {
+  const bootstrap = await app.inject({
+    method: 'POST',
+    path: '/api/v1/session/bootstrap',
+    headers: browserHeaders,
+    payload: {},
+  })
+  return {
+    ...browserHeaders,
+    cookie: String(bootstrap.headers['set-cookie']).split(';')[0]!,
+    'content-type': 'application/json',
+    'x-tradescript-csrf': bootstrap.json().csrfToken,
+  }
+}
+
+it('protects the direct agent trading toggle with authentication, CSRF, input validation and connection generation', async () => {
+  const { ConnectionManager } = await import('../src/connections/connection-manager.js')
+  const connections = new ConnectionManager(
+    loadGatewayConfig({ NODE_ENV: 'test', IBKR_ALLOWED_ACCOUNT_IDS: 'DU-test' }),
+    () => ({ start() {}, stop() {} }),
+  )
+  const setAgentTrading = vi.spyOn(connections, 'setAgentTrading')
+  const app = await createGatewayServer({
+    get config() {
+      return connections.config
+    },
+    connections,
+    proxyCapability: browserHeaders['x-terminal-proxy-capability'],
+    sessions: new SessionStore(),
+    tickets: new WebSocketTicketStore(),
+    events: new EventStream(),
+    getStatus: status,
+  })
+  apps.push(app)
+  const payload = {
+    enabled: true,
+    generation: connections.snapshot().generation,
+    expectedAgentTradingRevision: 0,
+    limits: agentLimits,
+  }
+  expect(
+    (
+      await app.inject({
+        method: 'PUT',
+        path: '/api/v1/connection/agent-trading',
+        headers: browserHeaders,
+        payload,
+      })
+    ).statusCode,
+  ).toBe(401)
+  const headers = await authenticatedHeaders(app)
+  expect(
+    (
+      await app.inject({
+        method: 'PUT',
+        path: '/api/v1/connection/agent-trading',
+        headers: { ...headers, 'x-tradescript-csrf': 'invalid' },
+        payload,
+      })
+    ).statusCode,
+  ).toBe(403)
+  for (const invalid of [
+    { ...payload, enabled: 'yes' },
+    { ...payload, generation: '' },
+    { ...payload, expectedAgentTradingRevision: undefined },
+    { ...payload, expectedAgentTradingRevision: -1 },
+    { ...payload, expectedAgentTradingRevision: 0.5 },
+    { ...payload, limits: { ...agentLimits, maxOrderQuantity: -1 } },
+  ]) {
+    expect(
+      (
+        await app.inject({
+          method: 'PUT',
+          path: '/api/v1/connection/agent-trading',
+          headers,
+          payload: invalid,
+        })
+      ).statusCode,
+    ).toBe(400)
+  }
+  expect(setAgentTrading).not.toHaveBeenCalled()
+  expect(
+    (
+      await app.inject({
+        method: 'PUT',
+        path: '/api/v1/connection/agent-trading',
+        headers,
+        payload: { ...payload, generation: 'stale' },
+      })
+    ).statusCode,
+  ).toBe(409)
+  expect(connections.config.agents.enabled).toBe(false)
+})
+
+it('saves agent limits and toggles agent authority without reconnecting, publishing the updated readiness', async () => {
+  const { ConnectionManager } = await import('../src/connections/connection-manager.js')
+  const factory = vi.fn(() => ({ start: vi.fn(), stop: vi.fn() }))
+  const connections = new ConnectionManager(
+    loadGatewayConfig({ NODE_ENV: 'test', IBKR_ALLOWED_ACCOUNT_IDS: 'DU-test' }),
+    factory,
+  )
+  const original = connections.runtime
+  const generation = connections.snapshot().generation
+  const events = new EventStream()
+  const published = vi.fn()
+  events.subscribe(published)
+  const app = await createGatewayServer({
+    get config() {
+      return connections.config
+    },
+    connections,
+    proxyCapability: browserHeaders['x-terminal-proxy-capability'],
+    sessions: new SessionStore(),
+    tickets: new WebSocketTicketStore(),
+    events,
+    getStatus: () => ({
+      ...status(),
+      ready: true,
+      tradingEnabled: true,
+      requirements: [
+        {
+          id: 'agent-risk',
+          label: 'Agent trading',
+          state: connections.config.agents.enabled ? 'ready' : 'disabled',
+          message: 'Current agent permission',
+          requiredForTrading: false,
+        },
+      ],
+    }),
+  })
+  apps.push(app)
+  const headers = await authenticatedHeaders(app)
+  const update = (payload: object) =>
+    app.inject({
+      method: 'PUT',
+      path: '/api/v1/connection/agent-trading',
+      headers,
+      payload: {
+        expectedAgentTradingRevision: connections.snapshot().agentTradingRevision,
+        ...payload,
+      },
+    })
+  expect((await update({ enabled: true, generation })).statusCode).toBe(400)
+  expect(published).not.toHaveBeenCalled()
+  const saved = await update({ enabled: false, generation, limits: agentLimits })
+  expect(saved.statusCode).toBe(200)
+  expect(saved.json()).toMatchObject({
+    generation,
+    settings: { profiles: { paper: { agentTradingEnabled: false, limits: agentLimits } } },
+  })
+  const enabled = await update({ enabled: true, generation })
+  expect(enabled.statusCode).toBe(200)
+  expect(connections.config.agents).toMatchObject({ enabled: true, riskLimits: agentLimits })
+  expect(published.mock.calls.at(-1)?.[0]).toMatchObject({
+    event: {
+      type: 'readiness.changed',
+      status: { requirements: [{ id: 'agent-risk', state: 'ready' }] },
+    },
+  })
+  const staleSave = await update({
+    enabled: false,
+    generation,
+    limits: { ...agentLimits, maxOrderQuantity: 200 },
+    expectedAgentTradingRevision: saved.json().agentTradingRevision,
+  })
+  expect(staleSave.statusCode).toBe(409)
+  expect(staleSave.json().error.message).toContain('Agent trading settings changed')
+  expect(connections.config.agents).toMatchObject({ enabled: true, riskLimits: agentLimits })
+  expect((await update({ enabled: false, generation })).statusCode).toBe(200)
+  expect(connections.config.agents.enabled).toBe(false)
+  expect(connections.config.ibkr.tradingEnabled).toBe(true)
+  expect(connections.snapshot().generation).toBe(generation)
+  expect(connections.runtime).toBe(original)
+  expect(factory).toHaveBeenCalledOnce()
+  expect(original.start).not.toHaveBeenCalled()
+  expect(original.stop).not.toHaveBeenCalled()
+  expect(published).toHaveBeenCalledTimes(3)
+})
+
+it('rechecks agent authority inside execution when it changes after the early request check', async () => {
+  const { ConnectionManager } = await import('../src/connections/connection-manager.js')
+  const { BrokerStateStore } = await import('../src/ibkr/state-store.js')
+  const config = loadGatewayConfig({ NODE_ENV: 'test', IBKR_ALLOWED_ACCOUNT_IDS: 'DU-test' })
+  const snapshot = new ConnectionManager(config, () => ({ start() {}, stop() {} })).snapshot()
+  let agentsEnabled = true
+  let release!: () => void
+  let entered!: () => void
+  const executing = new Promise<void>((resolve) => {
+    entered = resolve
+  })
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const placeOrder = vi.fn(async () => ({ id: 'synthetic-order' }))
+  const app = await createGatewayServer({
+    get config() {
+      return { ...config, agents: { ...config.agents, enabled: agentsEnabled } }
+    },
+    connections: {
+      snapshot: () => snapshot,
+      switch: async () => snapshot,
+      setAgentTrading: async (enabled): Promise<ConnectionSnapshot> => {
+        agentsEnabled = enabled
+        return snapshot
+      },
+      execute: async (_generation, execute) => {
+        entered()
+        await gate
+        return execute()
+      },
+    },
+    ibkr: { placeOrder } as unknown as import('../src/ibkr/ibkr-service.js').IbkrService,
+    brokerStore: new BrokerStateStore(),
+    proxyCapability: browserHeaders['x-terminal-proxy-capability'],
+    sessions: new SessionStore(),
+    tickets: new WebSocketTicketStore(),
+    events: new EventStream(),
+    getStatus: () => ({ ...status(), ready: true, tradingEnabled: true }),
+  })
+  apps.push(app)
+  const headers = await authenticatedHeaders(app)
+  const pending = app.inject({
+    method: 'POST',
+    path: '/api/v1/ibkr/orders',
+    headers: { ...headers, 'x-tradescript-connection': snapshot.generation },
+    payload: {
+      expectedExecutionEnvironment: 'paper',
+      draft: {
+        accountId: 'DU-test',
+        symbol: { symbol: 'TEST' },
+        side: 'buy',
+        type: 'limit',
+        quantity: 1,
+        limitPrice: 1,
+        duration: 'day',
+      },
+      metadata: { origin: 'mcp' },
+    },
+  })
+  await executing
+  const disabled = await app.inject({
+    method: 'PUT',
+    path: '/api/v1/connection/agent-trading',
+    headers,
+    payload: {
+      enabled: false,
+      generation: snapshot.generation,
+      expectedAgentTradingRevision: snapshot.agentTradingRevision,
+    },
+  })
+  expect(disabled.statusCode).toBe(200)
+  release()
+  const response = await pending
+  expect(response.statusCode).toBe(403)
+  expect(response.json().error.message).toBe('Agent trading is disabled for this connection.')
+  expect(placeOrder).not.toHaveBeenCalled()
+})
+
 it('exposes safe SDK recovery status and protects authorization retries with session and CSRF checks', async () => {
   const config = loadGatewayConfig({
     NODE_ENV: 'test',
@@ -68,7 +340,14 @@ it('exposes safe SDK recovery status and protects authorization retries with ses
       renewIfDue,
       activate: async () => ({ configured: true, ready: true }),
       clearCredentials: () => ({ configured: false, ready: false }),
-      snapshot: () => ({ state: 'error', ready: false, failure: 'rejected', message: 'rejected' }),
+      snapshot: () => ({
+        state: 'error',
+        ready: false,
+        failure: 'rejected',
+        failureReason: 'trial_access_expired',
+        message:
+          'Your seven-day free trial access has ended. Activate a subscription with your existing credentials.',
+      }),
     },
   })
   apps.push(app)
@@ -94,7 +373,14 @@ it('exposes safe SDK recovery status and protects authorization retries with ses
   expect(response.statusCode).toBe(200)
   expect(renewIfDue).toHaveBeenCalledTimes(1)
   expect(response.json()).toMatchObject({
-    sdk: { configured: true, ready: false, failure: 'rejected' },
+    sdk: {
+      configured: true,
+      ready: false,
+      failure: 'rejected',
+      failureReason: 'trial_access_expired',
+      message:
+        'Your seven-day free trial access has ended. Activate a subscription with your existing credentials.',
+    },
   })
   expect(response.body).not.toContain('private-id-fixture')
   expect(response.body).not.toContain('private-secret-fixture')
@@ -114,6 +400,26 @@ it('exposes safe SDK recovery status and protects authorization retries with ses
     ).statusCode,
   ).toBe(200)
   expect(retry).toHaveBeenCalledTimes(1)
+  retry.mockImplementationOnce(async () => {
+    throw new RequestError(401, 'Runtime credentials were rejected.', {
+      source: 'tradescript-authorization',
+      code: 'unauthorized',
+    })
+  })
+  const upstreamRejection = await app.inject({
+    method: 'POST',
+    path: '/api/v1/setup/sdk/retry',
+    headers: { ...headers, 'x-tradescript-csrf': bootstrap.json().csrfToken },
+    payload: {},
+  })
+  expect(upstreamRejection.statusCode).toBe(401)
+  expect(upstreamRejection.json()).toMatchObject({
+    error: {
+      code: 'unauthorized',
+      source: 'tradescript-authorization',
+      message: 'Runtime credentials were rejected.',
+    },
+  })
 })
 
 describe('gateway HTTP boundary', () => {
@@ -239,10 +545,15 @@ describe('gateway HTTP boundary', () => {
 
 it('serves and switches connection profiles through authenticated HTTP', async () => {
   const { ConnectionManager } = await import('../src/connections/connection-manager.js')
-  const connections = new ConnectionManager(loadGatewayConfig({ NODE_ENV: 'test' }), () => ({
-    start() {},
-    stop() {},
-  }))
+  const connections = new ConnectionManager(
+    loadGatewayConfig({ NODE_ENV: 'test' }),
+    () => ({
+      start() {},
+      stop() {},
+    }),
+    undefined,
+    async () => ['U-test'],
+  )
   const app = await createGatewayServer({
     get config() {
       return connections.config
@@ -273,12 +584,22 @@ it('serves and switches connection profiles through authenticated HTTP', async (
   const snapshot = current.json()
   snapshot.settings.active = 'live'
   snapshot.settings.profiles.live.port = 4014
-  snapshot.settings.profiles.live.permission = 'manual'
+  expect(
+    (await app.inject({ method: 'PUT', path: '/api/v1/connection', headers, payload: snapshot }))
+      .statusCode,
+  ).toBe(409)
+  const proof = await app.inject({
+    method: 'POST',
+    path: '/api/v1/connection/test',
+    headers,
+    payload: snapshot,
+  })
+  expect(proof.statusCode).toBe(200)
   const changed = await app.inject({
     method: 'PUT',
     path: '/api/v1/connection',
     headers,
-    payload: snapshot,
+    payload: { ...snapshot, testId: proof.json().testId },
   })
   expect(changed.statusCode).toBe(200)
   expect(connections.config.ibkr).toMatchObject({
@@ -302,21 +623,26 @@ it('serves and switches connection profiles through authenticated HTTP', async (
   ).toBe(403)
 })
 
-it('dispatches to the active broker and applies profile permissions and session generations', async () => {
+it('dispatches manual trades to the active broker and rejects stale session generations and disabled agents', async () => {
   const { ConnectionManager } = await import('../src/connections/connection-manager.js')
   const { BrokerStateStore } = await import('../src/ibkr/state-store.js')
   let placements = 0
-  const connections = new ConnectionManager(loadGatewayConfig({ NODE_ENV: 'test' }), () => ({
-    start() {},
-    stop() {},
-    brokerStore: new BrokerStateStore(),
-    ibkr: {
-      async placeOrder() {
-        placements += 1
-        return { id: 'synthetic-order' }
-      },
-    } as unknown as import('../src/ibkr/ibkr-service.js').IbkrService,
-  }))
+  const connections = new ConnectionManager(
+    loadGatewayConfig({ NODE_ENV: 'test' }),
+    () => ({
+      start() {},
+      stop() {},
+      brokerStore: new BrokerStateStore(),
+      ibkr: {
+        async placeOrder() {
+          placements += 1
+          return { id: 'synthetic-order' }
+        },
+      } as unknown as import('../src/ibkr/ibkr-service.js').IbkrService,
+    }),
+    undefined,
+    async () => ['U-test'],
+  )
   const app = await createGatewayServer({
     get config() {
       return connections.config
@@ -380,27 +706,30 @@ it('dispatches to the active broker and applies profile permissions and session 
   ).toBe(403)
   const snapshot = connections.snapshot()
   snapshot.settings.active = 'live'
-  snapshot.settings.profiles.live.permission = 'manual'
   snapshot.settings.profiles.live.port = 4020
-  await connections.switch(snapshot.settings, snapshot.generation)
+  snapshot.settings.profiles.live.connectionType = 'ib-gateway'
+  const liveTest = await connections.test(snapshot.settings, snapshot.generation)
+  await connections.switch(snapshot.settings, snapshot.generation, liveTest.testId)
   const health = await app.inject({ path: '/api/v1/ibkr/health', headers })
-  expect(health.json()).toMatchObject({ mode: 'live', ibkrPort: 4020 })
+  expect(health.json()).toMatchObject({
+    mode: 'live',
+    connectionType: 'ib-gateway',
+    ibkrPort: 4020,
+  })
   expect(
     (await app.inject({ method: 'POST', path: '/api/v1/ibkr/orders', headers, payload: order }))
       .statusCode,
   ).toBe(409)
   const current = connections.snapshot()
-  current.settings.profiles.live.permission = 'read-only'
-  const readOnly = await connections.switch(current.settings, current.generation)
   expect(
     (
       await app.inject({
         method: 'POST',
         path: '/api/v1/ibkr/orders',
-        headers: { ...headers, 'x-tradescript-connection': readOnly.generation },
+        headers: { ...headers, 'x-tradescript-connection': current.generation },
         payload: { ...order, expectedExecutionEnvironment: 'live' },
       })
     ).statusCode,
-  ).toBe(503)
-  expect(placements).toBe(1)
+  ).toBe(201)
+  expect(placements).toBe(2)
 })

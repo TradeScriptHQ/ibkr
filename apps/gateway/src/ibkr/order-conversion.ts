@@ -5,10 +5,9 @@ import {
   fromIbOptionLegs,
   fromIbSymbol,
   normalizeRoutingDestination,
-  resolveAssetClass,
 } from './contracts.js'
-import { parseIbBarTime } from './market-data.js'
 import { positiveContractId, positiveNumber } from './numbers.js'
+import { authoritativePipDefinition, pipDistanceInPrice } from './pip-definitions.js'
 import type {
   Execution,
   Order,
@@ -35,10 +34,28 @@ export function toIbOrder(
   transmit: boolean,
   options: IbOrderOverrideOptions = {},
 ): IbOrder {
+  const unsupported = ibkrOrderModificationRejection(order)
+  if (unsupported) throw new Error(unsupported)
+  if (
+    order.type === 'trailing-stop' &&
+    order.trailPercent != null &&
+    order.trailingStopPips != null
+  ) {
+    throw new Error('A trailing stop requires exactly one trailing distance method.')
+  }
+  if (
+    order.type === 'trailing-stop' &&
+    order.trailingStopPips != null &&
+    pipDistanceInPrice(order.symbol, order.trailingStopPips) === undefined
+  ) {
+    throw new Error(
+      'Pip-based trailing stops are unavailable: the authoritative instrument pip size is not supplied. Use trailing percent or TWS.',
+    )
+  }
   const oca = order.oca ? toIbOca(order.oca) : undefined
   const ibOrder: IbOrderWithOverrides = {
     orderId,
-    action: order.side === 'buy' ? OrderAction.BUY : OrderAction.SELL,
+    action: toIbAction(order),
     orderType: toIbOrderType(order.type),
     totalQuantity: order.cashQuantity === undefined ? order.quantity : undefined,
     cashQty: order.cashQuantity,
@@ -49,18 +66,22 @@ export function toIbOrder(
     includeOvernight:
       order.duration === 'overnight' || order.duration === 'overnight-day' || undefined,
     account: order.accountId,
+    orderRef: options.whatIf ? undefined : order.brokerOrderRef,
     transmit,
     outsideRth: order.outsideRth || undefined,
     hidden: order.hidden || undefined,
     displaySize: order.displaySize,
     allOrNone: order.allOrNone,
-    ocaGroup: oca?.ocaGroup ?? order.ocaGroup,
-    ocaType: oca?.ocaType ?? order.ocaType,
+    ocaGroup: options.whatIf ? undefined : (oca?.ocaGroup ?? order.ocaGroup),
+    ocaType: options.whatIf ? undefined : (oca?.ocaType ?? order.ocaType),
     whatIf: options.whatIf || undefined,
   }
   if (order.type === 'trailing-stop') {
     ibOrder.lmtPrice = undefined
-    ibOrder.auxPrice = order.trailingStopPips != null ? trailingPipsToPriceAmount(order) : undefined
+    ibOrder.auxPrice =
+      order.trailingStopPips === undefined
+        ? undefined
+        : pipDistanceInPrice(order.symbol, order.trailingStopPips)
     ibOrder.trailStopPrice = order.stopPrice
     ibOrder.trailingPercent = order.trailPercent
   } else if (order.type === 'trailing-stop-limit') {
@@ -77,7 +98,19 @@ export function toIbOrder(
   }
   if (order.type === 'adaptive' || order.type === 'ib-algo') {
     ibOrder.algoStrategy = 'Adaptive'
-    ibOrder.algoParams = [{ tag: 'adaptivePriority', value: 'Normal' }]
+    const rawParameters = order.customFields?.ibkrAlgoParams
+    const restoredParameters = Array.isArray(rawParameters)
+      ? rawParameters.filter(
+          (parameter): parameter is { tag: string; value: string } =>
+            typeof parameter === 'object' &&
+            parameter !== null &&
+            typeof parameter.tag === 'string' &&
+            typeof parameter.value === 'string',
+        )
+      : undefined
+    ibOrder.algoParams = restoredParameters?.length
+      ? restoredParameters
+      : [{ tag: 'adaptivePriority', value: 'Normal' }]
   }
   const parentId = Number(order.parentId)
   if (Number.isFinite(parentId) && parentId > 0) {
@@ -94,6 +127,29 @@ export function toIbOrder(
     ...Object.fromEntries(Object.entries(ibOrder).filter(([, value]) => value !== undefined)),
     orderType: toIbOrderType(order.type),
   }
+}
+
+/** Broker callbacks with unsupported wire semantics may be inspected/cancelled, never rewritten. */
+export function ibkrOrderModificationRejection(order: Order): string | undefined {
+  const reasons = order.customFields?.ibkrReadbackUnsupportedReasons
+  if (order.customFields?.ibkrReadbackUnsupported === true) {
+    const details = Array.isArray(reasons)
+      ? reasons.filter((reason): reason is string => typeof reason === 'string').join('; ')
+      : 'unmapped broker fields'
+    return `Unsupported IBKR order cannot be modified: ${details}. Use TWS to modify it.`
+  }
+  const action = order.customFields?.ibkrAction
+  if ((action === 'SSHORT' || action === 'SLONG') && order.side !== 'sell') {
+    return `Unsupported action change would discard the broker's ${action} designation.`
+  }
+  return undefined
+}
+
+function toIbAction(order: Order): OrderAction {
+  const action = order.customFields?.ibkrAction
+  if (action === 'SSHORT') return OrderAction.SSHORT
+  if (action === 'SLONG') return OrderAction.SLONG
+  return order.side === 'buy' ? OrderAction.BUY : OrderAction.SELL
 }
 
 function toIbOca(oca: NonNullable<OrderDraft['oca']>): {
@@ -166,12 +222,6 @@ function toIbOrderType(type: OrderType): IbOrderType {
   }
 }
 
-function trailingPipsToPriceAmount(order: Order): number {
-  const assetClass = resolveAssetClass(order.symbol.assetClass, order.symbol.exchange)
-  const pipValue = assetClass === 'forex' ? 0.0001 : 0.01
-  return Number(((order.trailingStopPips ?? 0) * pipValue).toFixed(assetClass === 'forex' ? 8 : 4))
-}
-
 function toIbDuration(duration: OrderDuration): TimeInForce {
   if (duration === 'gtc') return TimeInForce.GTC
   if (duration === 'gtd') return TimeInForce.GTD
@@ -200,14 +250,48 @@ export function fromIbOpenOrder(
   orderState: OrderState,
 ): Order {
   const timestamp = new Date().toISOString()
+  const rawType = String(order.orderType ?? '')
+    .trim()
+    .toUpperCase()
+  const rawAction = String(order.action ?? '')
+    .trim()
+    .toUpperCase()
+  const rawTif = String(order.tif ?? '')
+    .trim()
+    .toUpperCase()
+  const rawAlgorithm = String(order.algoStrategy ?? '').trim()
+  const mappedType = fromIbOrderType(rawType)
+  const mappedDuration = fromIbDuration(order, contract)
+  const unsupportedReasons: string[] = []
+  if (mappedType === undefined) unsupportedReasons.push(`order type ${rawType || '(missing)'}`)
+  if (!['BUY', 'SELL', 'SSHORT', 'SLONG'].includes(rawAction)) {
+    unsupportedReasons.push(`action ${rawAction || '(missing)'}`)
+  }
+  if (mappedDuration === undefined)
+    unsupportedReasons.push(`time in force ${rawTif || '(missing)'}`)
+  if (rawAlgorithm && (rawAlgorithm.toLowerCase() !== 'adaptive' || rawType !== 'LMT')) {
+    unsupportedReasons.push(`algorithm ${rawAlgorithm} with ${rawType}`)
+  }
+  // These legacy shape defaults are explicitly flagged and cannot be retransmitted.
+  // The SDK has no unsupported order/type/side representation; raw values remain authoritative.
   const type =
-    String(order.algoStrategy).toLowerCase() === 'adaptive'
+    rawAlgorithm.toLowerCase() === 'adaptive' && rawType === 'LMT'
       ? 'adaptive'
-      : fromIbOrderType(String(order.orderType))
+      : (mappedType ?? 'limit')
   const parentId = Number(order.parentId)
-  const optionLegs = fromIbOptionLegs(contract)
-  const auxPrice = Number(order.auxPrice) || undefined
-  const trailStopPrice = Number(order.trailStopPrice) || undefined
+  const optionLegs = fromIbOptionLegs(contract, order)
+  const auxPrice = fromIbPrice(order.auxPrice)
+  const trailStopPrice = fromIbPrice(order.trailStopPrice)
+  const trailPercent = fromIbPrice(order.trailingPercent)
+  const symbol = fromIbSymbol(contract)
+  const definition = authoritativePipDefinition(symbol)
+  if (definition) symbol.pipDefinition = definition
+  const absoluteTrail =
+    type === 'trailing-stop' && trailPercent === undefined ? auxPrice : undefined
+  const pipDefinition = authoritativePipDefinition(symbol)
+  if (absoluteTrail !== undefined && !pipDefinition) {
+    unsupportedReasons.push('absolute trailing amount has no authoritative instrument pip size')
+  }
   const ocaType = Number(order.ocaType) || undefined
   const displaySizeValue = Number(order.displaySize)
   const displaySize =
@@ -215,11 +299,19 @@ export function fromIbOpenOrder(
   return {
     id: String(orderId),
     brokerOrderId: orderId,
+    brokerOrderRef:
+      typeof order.orderRef === 'string' && order.orderRef ? order.orderRef : undefined,
+    permId: positiveContractId(order.permId),
+    clientId:
+      Number.isInteger(order.clientId) && Number(order.clientId) >= 0
+        ? Number(order.clientId)
+        : undefined,
     accountId: String(order.account ?? ''),
-    symbol: fromIbSymbol(contract),
-    side: String(order.action).toUpperCase() === 'SELL' ? 'sell' : 'buy',
+    symbol,
+    side: ['SELL', 'SSHORT', 'SLONG', 'SSHORTX'].includes(rawAction) ? 'sell' : 'buy',
     type,
-    duration: fromIbDuration(order, contract),
+    brokerOrderTypeId: rawType || undefined,
+    duration: mappedDuration ?? 'day',
     durationDateTime: fromIbGoodTillDate(order.goodTillDate),
     quantity: Number(order.totalQuantity ?? 0),
     cashQuantity: positiveNumber(order.cashQty),
@@ -229,7 +321,11 @@ export function fromIbOpenOrder(
         : Number(order.lmtPrice) || undefined,
     stopPrice:
       type === 'trailing-stop' || type === 'trailing-stop-limit' ? trailStopPrice : auxPrice,
-    trailPercent: Number(order.trailingPercent) || undefined,
+    trailPercent,
+    trailingStopPips:
+      absoluteTrail !== undefined && pipDefinition
+        ? absoluteTrail / pipDefinition.pipSize
+        : undefined,
     relativeOffset:
       type === 'relative' || type === 'retail-price-improvement' ? auxPrice : undefined,
     postOnly: Number(order.postToAts) > 0 || undefined,
@@ -251,28 +347,63 @@ export function fromIbOpenOrder(
     customFields: {
       orderVisibility: displaySize ? 'iceberg' : order.hidden ? 'hidden' : 'visible',
       displaySize,
+      ibkrOrderType: rawType,
+      ibkrAction: rawAction,
+      ibkrTimeInForce: rawTif,
+      ibkrAlgoStrategy: rawAlgorithm,
+      ibkrTrailingAmount: absoluteTrail,
+      ibkrAlgoParams: order.algoParams?.map(({ tag, value }) => ({ tag, value })),
+      ibkrReadbackUnsupported: unsupportedReasons.length > 0,
+      ibkrReadbackUnsupportedReasons: unsupportedReasons,
     },
     message: orderState.warningText,
   }
 }
 
-function fromIbDuration(order: IbOrder, contract: Contract): OrderDuration {
+function fromIbDuration(order: IbOrder, contract: Contract): OrderDuration | undefined {
+  const tif = String(order.tif ?? '').toUpperCase()
   if (order.includeOvernight) {
+    if (tif !== 'DAY') return undefined
     return String(contract.exchange).toUpperCase() === 'OVERNIGHT' ? 'overnight' : 'overnight-day'
   }
-  const tif = String(order.tif).toUpperCase()
+  if (tif === 'DAY') return 'day'
   if (tif === 'GTC') return 'gtc'
   if (tif === 'GTD') return 'gtd'
   if (tif === 'IOC') return 'ioc'
   if (tif === 'FOK') return 'fok'
   if (tif === 'OPG') return 'opg'
-  return 'day'
+  return undefined
+}
+
+function fromIbPrice(value: number | undefined): number | undefined {
+  // TWS represents unset prices/percentages with its maximum-double sentinel.
+  return value !== undefined && Number.isFinite(value) && value !== 0 && Math.abs(value) < 1e100
+    ? value
+    : undefined
 }
 
 function fromIbGoodTillDate(value: string | undefined): number | undefined {
   if (!value) return undefined
+  return parseIbWallClock(value)
+}
+
+/** TWS wall clocks need their login zone; the gateway host zone is not broker evidence. */
+export function parseIbExecutionTime(value: string): number | undefined {
+  const normalized = value.trim()
+  if (/^\d+(?:\.\d+)?$/.test(normalized)) {
+    const timestamp = Number(normalized) * 1000
+    return Number.isFinite(new Date(timestamp).getTime()) ? timestamp : undefined
+  }
+  if (/^\d{8}-\d{2}:\d{2}:\d{2}$/.test(normalized)) {
+    return parseIbWallClock(`${normalized.replace('-', ' ')} UTC`)
+  }
+  if (/^\d{8}\s+\d{2}:\d{2}:\d{2}$/.test(normalized)) return undefined
+  return parseIbWallClock(normalized)
+}
+
+function parseIbWallClock(value: string): number | undefined {
   const match = value.match(
-    /^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})(?:\s+([A-Za-z/_]+))?$/,
+    /^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})(?:\s+([A-Za-z0-9/_+-]+))?$/,
   )
   if (!match) return undefined
   const [, year, month, day, hour, minute, second, zone] = match
@@ -284,9 +415,28 @@ function fromIbGoodTillDate(value: string | undefined): number | undefined {
     Number(minute),
     Number(second),
   )
+  const wallClockDate = new Date(wallClockTimestamp)
+  if (
+    wallClockDate.getUTCFullYear() !== Number(year) ||
+    wallClockDate.getUTCMonth() !== Number(month) - 1 ||
+    wallClockDate.getUTCDate() !== Number(day) ||
+    wallClockDate.getUTCHours() !== Number(hour) ||
+    wallClockDate.getUTCMinutes() !== Number(minute) ||
+    wallClockDate.getUTCSeconds() !== Number(second)
+  )
+    return undefined
   if (!zone) {
     const timestamp = Date.parse(`${year}-${month}-${day}T${hour}:${minute}:${second}`)
-    return Number.isFinite(timestamp) ? timestamp : undefined
+    const local = new Date(timestamp)
+    return Number.isFinite(timestamp) &&
+      local.getFullYear() === Number(year) &&
+      local.getMonth() === Number(month) - 1 &&
+      local.getDate() === Number(day) &&
+      local.getHours() === Number(hour) &&
+      local.getMinutes() === Number(minute) &&
+      local.getSeconds() === Number(second)
+      ? timestamp
+      : undefined
   }
 
   try {
@@ -301,7 +451,7 @@ function fromIbGoodTillDate(value: string | undefined): number | undefined {
       hourCycle: 'h23',
     })
     let timestamp = wallClockTimestamp
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       const parts = Object.fromEntries(
         formatter
           .formatToParts(new Date(timestamp))
@@ -316,17 +466,19 @@ function fromIbGoodTillDate(value: string | undefined): number | undefined {
         Number(parts.minute),
         Number(parts.second),
       )
+      if (renderedWallClock === wallClockTimestamp) return timestamp
       timestamp += wallClockTimestamp - renderedWallClock
     }
-    return timestamp
+    return undefined
   } catch {
     return undefined
   }
 }
 
-function fromIbOrderType(type: string): OrderType {
+function fromIbOrderType(type: string): OrderType | undefined {
   const normalized = type.toUpperCase()
   if (normalized === 'MKT') return 'market'
+  if (normalized === 'LMT') return 'limit'
   if (normalized === 'MIDPRICE') return 'midprice'
   if (normalized === 'MTL') return 'market-to-limit'
   if (normalized === 'STP') return 'stop'
@@ -342,7 +494,7 @@ function fromIbOrderType(type: string): OrderType {
   if (normalized === 'SNAP PRIM') return 'snap-primary'
   if (normalized === 'MOC') return 'market-on-close'
   if (normalized === 'LOC') return 'limit-on-close'
-  return 'limit'
+  return undefined
 }
 
 export function fromIbPosition(
@@ -352,6 +504,8 @@ export function fromIbPosition(
   avgCost: number,
 ): Position {
   const symbol = fromIbSymbol(contract)
+  const definition = authoritativePipDefinition(symbol)
+  if (definition) symbol.pipDefinition = definition
   const derivative = ['FUT', 'FOP', 'OPT'].includes(String(contract.secType))
   const multiplier = positiveNumber(contract.multiplier)
   const averagePrice = derivative
@@ -376,10 +530,18 @@ export function fromIbExecution(
   accountId?: string,
 ): Execution {
   const executionTime =
-    typeof execution.time === 'string' ? parseIbBarTime(execution.time) : undefined
+    typeof execution.time === 'string' ? parseIbExecutionTime(execution.time) : undefined
   return {
     id: String(execution.execId ?? `${execution.orderId}-${execution.time}`),
     orderId: execution.orderId != null ? String(execution.orderId) : undefined,
+    brokerOrderId: execution.orderId,
+    clientId: execution.clientId,
+    permId: positiveContractId(execution.permId),
+    brokerOrderRef: execution.orderRef,
+    cumulativeQuantity:
+      Number.isFinite(execution.cumQty) && Number(execution.cumQty) >= 0
+        ? Number(execution.cumQty)
+        : undefined,
     accountId,
     positionId: accountId ? ibkrPositionId(accountId, contract) : undefined,
     symbol: fromIbSymbol(contract),
@@ -387,7 +549,8 @@ export function fromIbExecution(
     side: String(execution.side).toUpperCase().includes('BOT') ? 'buy' : 'sell',
     quantity: Number(execution.shares ?? 0),
     price: Number(execution.price ?? 0),
-    timestamp: new Date(executionTime ?? Date.now()).toISOString(),
+    // Empty means unknown. Replayed fills must never acquire the reconnect time.
+    timestamp: executionTime === undefined ? '' : new Date(executionTime).toISOString(),
   }
 }
 
@@ -410,14 +573,31 @@ function ibkrPositionId(accountId: string, contract: Contract): string {
   return `${accountId}:${contractIdentity}`
 }
 
-export function mapOrderStatus(status: string): OrderStatus {
-  const normalized = status.toLowerCase()
+export function mapOrderStatus(status: string, filled?: number, remaining?: number): OrderStatus {
+  const normalized = status.toLowerCase().replaceAll('-', '')
+  if (normalized === 'partiallyfilled') return 'partially-filled'
+  if (normalized === 'placing') return 'placing'
+  if (
+    ![
+      'filled',
+      'cancelled',
+      'apicancelled',
+      'inactive',
+      'rejected',
+      'pendingsubmit',
+      'apipending',
+    ].includes(normalized) &&
+    Number(filled) > 0 &&
+    Number(remaining) > 0
+  )
+    return 'partially-filled'
   if (normalized === 'presubmitted') return 'pre-submitted'
   if (normalized === 'pendingsubmit' || normalized === 'apipending') return 'placing'
   if (normalized === 'submitted') return 'working'
   if (normalized === 'filled') return 'filled'
   if (normalized === 'cancelled' || normalized === 'apicancelled') return 'cancelled'
   if (normalized === 'inactive') return 'inactive'
+  if (normalized === 'rejected') return 'rejected'
   if (normalized === 'pendingcancel') return 'working'
   return 'working'
 }

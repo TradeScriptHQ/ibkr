@@ -25,6 +25,11 @@ export function createDesktopProxy(options: {
 }) {
   const expectedHost = new URL(options.origin).host
   const proxy = httpProxy.createProxyServer({ ws: true })
+  proxy.on('proxyRes', (upstream, _request, response) => {
+    response.once('close', () => {
+      if (!response.writableEnded) upstream.destroy()
+    })
+  })
   proxy.on('error', (_error, _request, response) => {
     if ('writeHead' in response && !response.headersSent)
       response.writeHead(502, { 'content-type': 'text/plain' })
@@ -34,12 +39,26 @@ export function createDesktopProxy(options: {
     'x-terminal-proxy-capability': options.capability,
     'x-tradescript-client': 'terminal-v1',
   }
+  const requestPath = (target: string | undefined): string | undefined => {
+    if (!target?.startsWith('/') || target.startsWith('//') || target.includes('\\'))
+      return undefined
+    try {
+      const parsed = new URL(target, options.origin)
+      return parsed.origin === options.origin ? parsed.pathname : undefined
+    } catch {
+      return undefined
+    }
+  }
   const server = createServer((request, response) => {
     if (request.headers.host !== expectedHost) {
       response.writeHead(403).end()
       return
     }
-    const pathname = new URL(request.url ?? '/', options.origin).pathname
+    const pathname = requestPath(request.url)
+    if (pathname === undefined) {
+      response.writeHead(400).end()
+      return
+    }
     if (pathname.startsWith('/api/') || pathname.startsWith('/mcp-local/')) {
       // Keep the browser's Origin/Fetch-Site and cookies; never fabricate browser trust.
       const mcp = pathname.startsWith('/mcp-local/')
@@ -87,10 +106,11 @@ export function createDesktopProxy(options: {
     })
   })
   server.on('upgrade', (request, socket, head) => {
+    socket.on('error', () => socket.destroy())
     if (
       request.headers.host !== expectedHost ||
       request.headers.origin !== options.origin ||
-      new URL(request.url ?? '/', options.origin).pathname !== '/api/v1/stream'
+      requestPath(request.url) !== '/api/v1/stream'
     ) {
       socket.destroy()
       return

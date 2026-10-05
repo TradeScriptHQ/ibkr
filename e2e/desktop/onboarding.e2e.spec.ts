@@ -6,7 +6,8 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { expect, test } from '@playwright/test'
+import type { ConnectionSnapshot } from '@ibkr-terminal/contracts'
+import { expect, type Locator, type Page, test } from '@playwright/test'
 import WebSocket from 'ws'
 import type { SetupStatus } from '../../apps/terminal/src/sdk-authorization.js'
 
@@ -82,7 +83,7 @@ test('fresh packaged onboarding, activation failure and connection discovery UI'
   const errors: string[] = []
   page.on('pageerror', (error) => errors.push(error.message))
   await page.goto(runtimeOrigin)
-  await expect(page.getByText('Welcome to TradeScript')).toBeVisible()
+  await expect(page.getByText('Welcome to IBKR Tradescript Terminal')).toBeVisible()
   await expect(page.getByLabel('Client key', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Activate SDK' })).toBeDisabled()
   // Test gateway validation without contacting the licensing service or any TWS.
@@ -127,7 +128,7 @@ test('fresh packaged onboarding, activation failure and connection discovery UI'
   )
   await page.getByRole('button', { name: 'Activate SDK' }).click()
   await expect(page.getByText('SDK credentials saved · Activated')).toBeVisible()
-  await page.getByRole('button', { name: 'Connection', exact: true }).click()
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
   await expect(page.getByRole('dialog', { name: 'Connection', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Apply and connect' })).toBeDisabled()
   await expect(page.getByText('Allowed accounts', { exact: true })).toHaveCount(0)
@@ -141,6 +142,248 @@ test('fresh packaged onboarding, activation failure and connection discovery UI'
   await page.getByRole('button', { name: 'Close', exact: true }).last().click()
   await page.screenshot({ path: test.info().outputPath('desktop-onboarding.png'), fullPage: true })
   expect(errors).toEqual([])
+})
+
+function onboardingConnection(): ConnectionSnapshot {
+  return {
+    generation: 'onboarding-connection-fixture',
+    settings: {
+      active: 'paper',
+      profiles: {
+        paper: {
+          connectionType: 'tws',
+          port: 7497,
+          clientId: 73,
+          agentTradingEnabled: false,
+          allowedAccountIds: [],
+        },
+        live: {
+          connectionType: 'tws',
+          port: 7496,
+          clientId: 73,
+          agentTradingEnabled: false,
+          allowedAccountIds: [],
+        },
+      },
+    },
+  }
+}
+
+async function selectConnectionOption(
+  page: Page,
+  name: string,
+  option: string,
+  scope: Page | Locator = page,
+) {
+  await scope.getByRole('combobox', { name, exact: true }).click()
+  await page.getByRole('option', { name: option, exact: true }).click()
+}
+
+async function mockAuthorizedOnboarding(page: Page) {
+  await page.route('**/api/v1/setup', (route) =>
+    route.fulfill({
+      json: {
+        sdk: { configured: true, ready: true, state: 'ready', version: '0.1.34' },
+        connectionConfigured: false,
+      },
+    }),
+  )
+}
+
+test('onboarding derives all TWS and IB Gateway ports and retains advanced settings by trading mode', async ({
+  page,
+}) => {
+  const connection = onboardingConnection()
+  await mockAuthorizedOnboarding(page)
+  await page.route('**/api/v1/connection', (route) => {
+    expect(route.request().method()).toBe('GET')
+    return route.fulfill({ json: connection })
+  })
+  // Choosing Live here exercises local controls only. No broker test or connect is permitted.
+  const brokerAttempts: string[] = []
+  await page.route('**/api/v1/connection/test', (route) => {
+    brokerAttempts.push(route.request().method())
+    return route.abort()
+  })
+  await page.goto(runtimeOrigin)
+  await expect(page.getByRole('combobox', { name: 'Trading mode', exact: true })).toHaveText(
+    'Paper',
+  )
+  await expect(page.getByRole('combobox', { name: 'Connection type', exact: true })).toHaveText(
+    'TWS',
+  )
+  await expect(page.getByText('Default port · 7497', { exact: true })).toBeVisible()
+  await selectConnectionOption(page, 'Connection type', 'IB Gateway')
+  await expect(page.getByText('Default port · 4002', { exact: true })).toBeVisible()
+  await selectConnectionOption(page, 'Trading mode', 'Live')
+  await expect(page.getByText('Default port · 7496', { exact: true })).toBeVisible()
+  await selectConnectionOption(page, 'Connection type', 'IB Gateway')
+  await expect(page.getByText('Default port · 4001', { exact: true })).toBeVisible()
+  await selectConnectionOption(page, 'Trading mode', 'Paper')
+  await expect(page.getByRole('combobox', { name: 'Connection type', exact: true })).toHaveText(
+    'IB Gateway',
+  )
+  await expect(page.getByText('Default port · 4002', { exact: true })).toBeVisible()
+  await page.screenshot({
+    path: test.info().outputPath('onboarding-paper-gateway.png'),
+    animations: 'disabled',
+  })
+
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Connection', exact: true })
+  const port = dialog.getByRole('spinbutton', { name: 'Port', exact: true })
+  const useDefault = dialog.getByRole('button', { name: 'Use default port', exact: true })
+  await expect(port).toBeVisible()
+  await expect(port).toHaveValue('4002')
+  await expect(useDefault).toBeDisabled()
+  await port.fill('5000')
+  await expect(dialog.getByText('Custom port · 5000', { exact: true })).toBeVisible()
+  await expect(useDefault).toBeEnabled()
+  await page.screenshot({
+    path: test.info().outputPath('onboarding-advanced-custom-port.png'),
+    animations: 'disabled',
+  })
+  await selectConnectionOption(page, 'Trading mode', 'Live', dialog)
+  await expect(port).toHaveValue('4001')
+  await port.fill('5001')
+  await selectConnectionOption(page, 'Trading mode', 'Paper', dialog)
+  await expect(port).toHaveValue('5000')
+  await useDefault.click()
+  await expect(port).toHaveValue('4002')
+  await port.fill('5000')
+  await selectConnectionOption(page, 'Connection type', 'TWS', dialog)
+  await expect(port).toHaveValue('7497')
+  await expect(useDefault).toBeDisabled()
+  await dialog.getByRole('button', { name: 'Close', exact: true }).last().click()
+  await expect(page.getByText('Default port · 7497', { exact: true })).toBeVisible()
+  await page.screenshot({
+    path: test.info().outputPath('onboarding-connection-controls.png'),
+    animations: 'disabled',
+  })
+  expect(brokerAttempts).toEqual([])
+})
+
+test('onboarding Connect tests and applies the selected paper Gateway with a default or manual port', async ({
+  page,
+}) => {
+  let connection = onboardingConnection()
+  await mockAuthorizedOnboarding(page)
+  const tested: Array<{ generation: string; settings: ConnectionSnapshot['settings'] }> = []
+  const applied: Array<{
+    generation: string
+    testId: string
+    settings: ConnectionSnapshot['settings']
+  }> = []
+  // Both routes are intercepted: this verifies paper request wiring without broker traffic.
+  await page.route('**/api/v1/connection/test', (route) => {
+    expect(route.request().method()).toBe('POST')
+    expect(route.request().headers()['x-tradescript-csrf']).toBeTruthy()
+    const request = route.request().postDataJSON()
+    expect(request.settings.active).toBe('paper')
+    tested.push(request)
+    return route.fulfill({ json: { testId: `fixture-${tested.length}`, accounts: ['DU-FIXTURE'] } })
+  })
+  await page.route('**/api/v1/connection', (route) => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: connection })
+    expect(route.request().method()).toBe('PUT')
+    expect(route.request().headers()['x-tradescript-csrf']).toBeTruthy()
+    const request = route.request().postDataJSON()
+    expect(request.settings.active).toBe('paper')
+    expect(request.testId).toBe(`fixture-${tested.length}`)
+    expect(request.generation).toBe(tested.at(-1)?.generation)
+    expect(request.settings).toEqual(tested.at(-1)?.settings)
+    applied.push(request)
+    connection = {
+      generation: `applied-fixture-${applied.length}`,
+      settings: {
+        ...request.settings,
+        profiles: {
+          ...request.settings.profiles,
+          paper: { ...request.settings.profiles.paper, allowedAccountIds: ['DU-FIXTURE'] },
+        },
+      },
+    }
+    return route.fulfill({ json: connection })
+  })
+  await page.goto(runtimeOrigin)
+  await selectConnectionOption(page, 'Connection type', 'IB Gateway')
+  await expect(page.getByText('Default port · 4002', { exact: true })).toBeVisible()
+  await Promise.all([
+    page.waitForEvent('load'),
+    page.getByRole('button', { name: 'Connect', exact: true }).click(),
+  ])
+  await expect.poll(() => applied.length).toBe(1)
+  await expect(page.getByRole('combobox', { name: 'Connection type', exact: true })).toHaveText(
+    'IB Gateway',
+  )
+  expect(applied[0]?.settings.profiles.paper).toMatchObject({
+    connectionType: 'ib-gateway',
+    port: 4002,
+    clientId: 73,
+    agentTradingEnabled: false,
+  })
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Connection', exact: true })
+  const port = dialog.getByRole('spinbutton', { name: 'Port', exact: true })
+  await port.fill('5000')
+  await dialog.getByRole('button', { name: 'Close', exact: true }).last().click()
+  await expect(page.getByText('Custom port · 5000', { exact: true })).toBeVisible()
+  await Promise.all([
+    page.waitForEvent('load'),
+    page.getByRole('button', { name: 'Connect', exact: true }).click(),
+  ])
+  await expect.poll(() => applied.length).toBe(2)
+  await expect(page.getByText('Custom port · 5000', { exact: true })).toBeVisible()
+  expect(applied[1]?.settings.profiles.paper).toMatchObject({
+    connectionType: 'ib-gateway',
+    port: 5000,
+    clientId: 73,
+    agentTradingEnabled: false,
+  })
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+  await port.fill('0')
+  await dialog.getByRole('button', { name: 'Close', exact: true }).last().click()
+  await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled()
+  expect(tested).toHaveLength(2)
+})
+
+test('onboarding Connect reports discovery failure without applying and restores its controls', async ({
+  page,
+}) => {
+  await mockAuthorizedOnboarding(page)
+  const connection = onboardingConnection()
+  let applyAttempts = 0
+  let finishDiscovery: (() => void) | undefined
+  const discovery = new Promise<void>((resolve) => {
+    finishDiscovery = resolve
+  })
+  await page.route('**/api/v1/connection', (route) => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: connection })
+    applyAttempts++
+    return route.abort()
+  })
+  await page.route('**/api/v1/connection/test', async (route) => {
+    expect(route.request().method()).toBe('POST')
+    expect(route.request().postDataJSON().settings.active).toBe('paper')
+    await discovery
+    return route.fulfill({
+      status: 502,
+      json: { error: { message: 'Could not connect to IB Gateway.' } },
+    })
+  })
+  await page.goto(runtimeOrigin)
+  await selectConnectionOption(page, 'Connection type', 'IB Gateway')
+  await page.getByRole('button', { name: 'Connect', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Testing…', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Advanced', exact: true })).toBeDisabled()
+  await expect(page.getByRole('combobox', { name: 'Trading mode', exact: true })).toBeDisabled()
+  finishDiscovery?.()
+  await expect(page.getByRole('alert')).toHaveText('Could not connect to IB Gateway.')
+  await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Advanced', exact: true })).toBeEnabled()
+  await expect(page.getByRole('combobox', { name: 'Trading mode', exact: true })).toBeEnabled()
+  await expect(page.getByRole('dialog', { name: 'Connection', exact: true })).toHaveCount(0)
+  expect(applyAttempts).toBe(0)
 })
 
 test('replaces rejected credentials during incomplete setup and preserves errors and input across polling', async ({
@@ -182,7 +425,7 @@ test('replaces rejected credentials during incomplete setup and preserves errors
   await expect(page.getByLabel('Client key', { exact: true })).toHaveValue('replacement-fixture')
   await page.getByRole('button', { name: 'Update SDK credentials', exact: true }).click()
   await expect(page.getByText('SDK credentials saved · Activated')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Connection', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Advanced', exact: true })).toBeVisible()
   // Even with a valid saved credential and no TWS profile yet, replacement stays accessible.
   await page.getByRole('button', { name: 'Update SDK credentials', exact: true }).click()
   await expect(page.getByLabel('Secret', { exact: true })).toHaveValue('')
@@ -217,7 +460,7 @@ test('detects rejected renewal, recovers after expiry, and reloads with saved wo
     timeout: 12000,
   })
   await expect(
-    page.getByText('Your TWS connection settings and saved workspace are preserved.'),
+    page.getByText('Your broker connection settings and saved workspace are preserved.'),
   ).toBeVisible()
   await page.screenshot({ path: test.info().outputPath('sdk-recovery.png'), fullPage: true })
   const before = documents
@@ -386,5 +629,5 @@ test('stops packaged services, releases their ports and reopens the workstation'
   }
   await launchRuntime(Number(new URL(runtimeOrigin).port))
   await page.goto(runtimeOrigin)
-  await expect(page.getByText('Welcome to TradeScript')).toBeVisible()
+  await expect(page.getByText('Welcome to IBKR Tradescript Terminal')).toBeVisible()
 })

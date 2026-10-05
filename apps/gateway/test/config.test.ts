@@ -2,10 +2,28 @@ import { describe, expect, it } from 'vitest'
 import { loadGatewayConfig } from '../src/config.js'
 
 describe('gateway configuration', () => {
+  it('rejects fractional order-count limits in environment and connection profile inputs', () => {
+    expect(() => loadGatewayConfig({ AGENT_MAX_ORDERS_PER_MINUTE: '1.5' })).toThrow()
+    expect(
+      ConnectionProfileSchema.shape.limits.unwrap().safeParse({
+        maxOrderQuantity: 10,
+        maxOrderNotional: 1000,
+        maxPositionQuantity: 10,
+        maxPositionNotional: 1000,
+        maxDailyLoss: 100,
+        maxOrdersPerMinute: 1.5,
+        maxEstimatedSlippageBps: 100,
+        maxMarketDataAgeMs: 1000,
+        maxLeverage: 2,
+        maxUnprotectedPositionQuantity: 10,
+      }).success,
+    ).toBe(false)
+  })
   it('boots in safe setup mode without credentials', () => {
     const config = loadGatewayConfig({ NODE_ENV: 'test' })
     expect(config.gateway).toEqual({ host: '127.0.0.1', port: 3001 })
     expect(config.ibkr.port).toBe(7497)
+    expect(config.ibkr.connectionType).toBe('tws')
     expect(config.ibkr.bindManualOrders).toBe(false)
     expect(config.agents.enabled).toBe(false)
     expect(config.tradescript.runtimeCredentialsConfigured).toBe(false)
@@ -16,6 +34,36 @@ describe('gateway configuration', () => {
     expect(
       loadGatewayConfig({ IBKR_EXECUTION_ENVIRONMENT: 'live', IBKR_PORT: '4013' }).ibkr,
     ).toMatchObject({ executionEnvironment: 'live', port: 4013 })
+  })
+
+  it.each([
+    ['paper', 'tws', 7497],
+    ['live', 'tws', 7496],
+    ['paper', 'ib-gateway', 4002],
+    ['live', 'ib-gateway', 4001],
+  ])('derives the %s %s port when no override is configured', (mode, connectionType, port) => {
+    expect(
+      loadGatewayConfig({ IBKR_EXECUTION_ENVIRONMENT: mode, IBKR_CONNECTION_TYPE: connectionType })
+        .ibkr,
+    ).toMatchObject({ executionEnvironment: mode, connectionType, port })
+  })
+
+  it('preserves advanced ports and infers standard Gateway ports for older environment configuration', () => {
+    expect(
+      loadGatewayConfig({ IBKR_CONNECTION_TYPE: 'ib-gateway', IBKR_PORT: '4012' }).ibkr,
+    ).toMatchObject({ connectionType: 'ib-gateway', port: 4012 })
+    expect(loadGatewayConfig({ IBKR_PORT: '4002' }).ibkr).toMatchObject({
+      connectionType: 'ib-gateway',
+      port: 4002,
+    })
+    expect(loadGatewayConfig({ IBKR_PORT: '4051' }).ibkr).toMatchObject({
+      connectionType: 'tws',
+      port: 4051,
+    })
+  })
+
+  it('rejects unsupported connection types', () => {
+    expect(() => loadGatewayConfig({ IBKR_CONNECTION_TYPE: 'other' })).toThrow()
   })
 
   it('rejects public and alias hosts', () => {
@@ -67,6 +115,34 @@ describe('gateway configuration', () => {
     expect(config.agents.riskLimits?.maxOrderNotional).toBe(5000)
   })
 
+  it('authors explicit null quantity caps when value-based environment limits are configured', () => {
+    const config = loadGatewayConfig({
+      AGENT_TRADING_ENABLED: 'true',
+      IBKR_ALLOWED_ACCOUNT_IDS: 'DU12345',
+      AGENT_MAX_ORDER_NOTIONAL: '5000',
+      AGENT_MAX_POSITION_NOTIONAL: '15000',
+      AGENT_MAX_GROSS_EXPOSURE: '25000',
+      AGENT_MAX_DAILY_LOSS: '1000',
+      AGENT_MAX_ORDERS_PER_MINUTE: '5',
+      AGENT_MAX_ESTIMATED_SLIPPAGE_BPS: '50',
+      AGENT_MAX_MARKET_DATA_AGE_MS: '5000',
+      AGENT_MAX_LEVERAGE: '2',
+    })
+    expect(config.agents.riskLimits).toEqual({
+      maxOrderQuantity: null,
+      maxOrderNotional: 5000,
+      maxPositionQuantity: null,
+      maxPositionNotional: 15000,
+      maxGrossExposure: 25000,
+      maxDailyLoss: 1000,
+      maxOrdersPerMinute: 5,
+      maxEstimatedSlippageBps: 50,
+      maxMarketDataAgeMs: 5000,
+      maxLeverage: 2,
+      maxUnprotectedPositionQuantity: null,
+    })
+  })
+
   it('rejects partial TradeScript credential sets', () => {
     expect(() => loadGatewayConfig({ TRADESCRIPT_CREDENTIAL_ID: 'credential' })).toThrow(
       /partially configured/u,
@@ -100,3 +176,5 @@ describe('gateway configuration', () => {
     ).toThrow(/HTTPS deployment lease endpoint/u)
   })
 })
+
+import { ConnectionProfileSchema } from '@ibkr-terminal/contracts'

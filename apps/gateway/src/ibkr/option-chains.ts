@@ -15,7 +15,9 @@ import type { IbkrRequests } from './ibkr-requests.js'
 import { positiveContractId, positiveInteger, positiveNumber, positivePrice } from './numbers.js'
 import type { ResolvedOptionQuoteContract } from './option-chain.js'
 import {
+  assertOptionIdentity,
   optionContractQuoteKey,
+  selectExactOptionDetails,
   selectOptionParameters,
   selectOptionQuoteWindowStrikes,
   toOptionChainContract,
@@ -23,6 +25,7 @@ import {
   uniqueOptionChainContracts,
 } from './option-chain.js'
 import { OptionQuoteStreams, type OptionStreamQuote } from './option-quote-streams.js'
+import { authoritativePriceIncrements, selectedMarketRuleId } from './order-price-increments.js'
 import type { QuoteSubscriptions } from './quote-subscriptions.js'
 import { RequestError } from './request-error.js'
 import type { BrokerStateStore } from './state-store.js'
@@ -51,6 +54,8 @@ export interface OptionChainRequest {
   centerPrice?: number | undefined
   quoteWindowRows?: number | undefined
   maxQuoteContracts?: number | undefined
+  tradingClass?: string | undefined
+  includeTradingClasses?: boolean | undefined
 }
 
 interface ResolvedQuoteTarget {
@@ -79,11 +84,12 @@ export class OptionChains {
     )
   }
   clear(): void {
-    this.optionQuoteStreams.clear()
+    this.optionQuoteStreams.suspend()
     this.optionChainCache.clear()
     this.optionContractCatalogCache.clear()
     this.optionContractCatalogInflight.clear()
     this.resolvedOptionQuoteContracts.clear()
+    this.qualifiedCatalogContracts.clear()
   }
   restoreQuoteStreams(): void {
     this.optionQuoteStreams.restore()
@@ -92,7 +98,12 @@ export class OptionChains {
 
   private readonly resolvedOptionQuoteContracts = new Map<
     string,
-    Promise<ResolvedOptionQuoteContract>
+    { expiresAt: number; value: Promise<ResolvedOptionQuoteContract> }
+  >()
+
+  private readonly qualifiedCatalogContracts = new Map<
+    number,
+    { expiresAt: number; value: ResolvedOptionQuoteContract }
   >()
 
   private readonly optionChainCache = new Map<
@@ -160,6 +171,11 @@ export class OptionChains {
     const cacheKey = JSON.stringify({
       ...params,
       expirations: [...(params.expirations ?? [])].sort(),
+      // Date-only automatic eligibility changes at midnight, including while a
+      // five-minute provider catalog cache is otherwise still fresh.
+      ...(params.expirations?.length
+        ? {}
+        : { catalogDay: new Date(Date.now()).toISOString().slice(0, 10) }),
     })
     const cached = this.optionChainCache.get(cacheKey)
     if (cached && cached.expiresAt > Date.now()) {
@@ -221,19 +237,7 @@ export class OptionChains {
     }
   }
 
-  private async loadOptionChain(params: {
-    underlying: string
-    underlyingAssetClass?: string | undefined
-    underlyingExchange?: string | undefined
-    exchange?: string | undefined
-    currency?: string | undefined
-    expirations?: string[] | undefined
-    minStrike?: number | undefined
-    maxStrike?: number | undefined
-    centerPrice?: number | undefined
-    quoteWindowRows?: number | undefined
-    maxQuoteContracts?: number | undefined
-  }): Promise<OptionChainResult> {
+  private async loadOptionChain(params: OptionChainRequest): Promise<OptionChainResult> {
     if (this.store.getState().connectionStatus !== 'connected') {
       throw new RequestError(503, 'IBKR bridge is not connected')
     }
@@ -286,7 +290,52 @@ export class OptionChains {
       underlyingSecType,
       underlyingConId,
     )
-    const selectedParams = selectOptionParameters(optionParams, requestedExchange)
+    const usableClasses = optionParams.filter(
+      (item) => item.expirations.length && item.strikes.length,
+    )
+    const classExchange =
+      requestedExchange && usableClasses.some((item) => item.exchange === requestedExchange)
+        ? requestedExchange
+        : usableClasses.some((item) => item.exchange === 'SMART')
+          ? 'SMART'
+          : undefined
+    const tradingClasses = [
+      ...new Map(
+        usableClasses
+          .filter(
+            (item) =>
+              (classExchange === undefined || item.exchange === classExchange) &&
+              positiveNumber(Number(item.multiplier)),
+          )
+          .map((item) => [
+            `${item.tradingClass}|${item.exchange}|${item.multiplier}`,
+            { id: item.tradingClass, exchange: item.exchange, multiplier: Number(item.multiplier) },
+          ]),
+      ).values(),
+    ].sort(
+      (left, right) =>
+        left.id.localeCompare(right.id) ||
+        left.exchange.localeCompare(right.exchange) ||
+        left.multiplier - right.multiplier,
+    )
+    if (
+      params.includeTradingClasses &&
+      params.tradingClass === undefined &&
+      new Set(tradingClasses.map((item) => item.id)).size > 1
+    ) {
+      return {
+        underlying,
+        exchange: requestedExchange || 'SMART',
+        currency,
+        tradingClasses,
+        expirations: [],
+      }
+    }
+    const selectedParams = selectOptionParameters(
+      optionParams,
+      requestedExchange,
+      params.tradingClass,
+    )
     if (!selectedParams) {
       throw new RequestError(404, `IBKR did not return option chain parameters for ${underlying}`)
     }
@@ -303,14 +352,20 @@ export class OptionChains {
       (positivePrice(underlyingQuote?.bid) && positivePrice(underlyingQuote?.ask)
         ? (underlyingQuote.bid + underlyingQuote.ask) / 2
         : undefined)
-    const multiplier = Number(selectedParams.multiplier) || 100
+    const multiplier = positiveNumber(Number(selectedParams.multiplier))
+    if (multiplier === undefined)
+      throw new RequestError(409, 'IBKR did not supply a valid option class multiplier.')
     const optionExchange = requestedExchange || 'SMART'
     // reqSecDefOptParams returns independent expiration and strike sets; their cartesian
     // product is not a contract catalog. Qualify the active expiration through IBKR and
     // publish only the exact contracts returned by contractDetails. The initial metadata
-    // request loads the nearest expiration; selecting another expiration triggers its own
-    // exact catalog request while retaining the full broker-provided expiration list.
-    const expirationsToLoad = params.expirations?.length ? expirations : expirations.slice(0, 1)
+    // request loads the nearest strictly future date. Date-only metadata cannot
+    // establish a same-day option's native final trading deadline. Explicit
+    // selections remain available, including provider-listed historical dates.
+    const catalogDay = new Date(Date.now()).toISOString().slice(0, 10)
+    const expirationsToLoad = params.expirations?.length
+      ? expirations
+      : expirations.filter((expiration) => expiration > catalogDay).slice(0, 1)
     const loadedExpirations = await mapWithConcurrency(
       expirationsToLoad,
       OPTION_CATALOG_CONCURRENCY,
@@ -361,6 +416,8 @@ export class OptionChains {
       underlying,
       exchange: optionExchange,
       currency,
+      tradingClass: selectedParams.tradingClass,
+      tradingClasses,
       expirations: chainExpirations,
     }
   }
@@ -408,6 +465,14 @@ export class OptionChains {
           }),
         )
         const value = resolved.flat()
+        for (const contract of value) {
+          const id = positiveContractId(contract.conId)
+          if (id !== undefined)
+            this.qualifiedCatalogContracts.set(id, {
+              expiresAt: Date.now() + OPTION_CATALOG_CACHE_MS,
+              value: contract,
+            })
+        }
         this.optionContractCatalogCache.set(cacheKey, {
           expiresAt: Date.now() + OPTION_CATALOG_CACHE_MS,
           value,
@@ -465,11 +530,9 @@ export class OptionChains {
   }
 
   private optionCenterPrice(chain: OptionChainResult, requested?: number): number | undefined {
-    const quote = this.quotes.findQuote({
-      symbol: chain.underlying,
-      currency: chain.currency,
-      assetClass: 'stock',
-    })
+    const underlying = chain.expirations.flatMap((expiration) => expiration.contracts)[0]?.contract
+      .underlyingSymbolInfo
+    const quote = underlying ? this.quotes.findQuote(underlying) : undefined
     return (
       positiveNumber(requested) ??
       positiveNumber(quote?.last) ??
@@ -553,23 +616,28 @@ export class OptionChains {
   ): Promise<ResolvedOptionQuoteContract> {
     const brokerContractId = positiveContractId(contract.brokerContractId)
     if (brokerContractId !== undefined) {
-      return {
-        ...toIbOptionContract(contract),
-        conId: brokerContractId,
-        ...(positiveNumber(contract.priceStep) === undefined
-          ? {}
-          : { priceStep: contract.priceStep }),
+      const qualified = this.qualifiedCatalogContracts.get(brokerContractId)
+      if (qualified && qualified.expiresAt > Date.now()) {
+        assertOptionIdentity(toIbOptionContract(contract), qualified.value)
+        const exchange = contract.route || contract.exchange
+        return {
+          ...qualified.value,
+          ...(exchange ? { exchange } : {}),
+        }
       }
     }
     const key = optionContractQuoteKey(contract)
     const cached = this.resolvedOptionQuoteContracts.get(key)
-    if (cached) return cached
+    if (cached && cached.expiresAt > Date.now()) return cached.value
     const request = this.loadOptionQuoteContract(contract).catch((error) => {
       this.resolvedOptionQuoteContracts.delete(key)
       throw error
     })
     if (this.resolvedOptionQuoteContracts.size >= 1000) this.resolvedOptionQuoteContracts.clear()
-    this.resolvedOptionQuoteContracts.set(key, request)
+    this.resolvedOptionQuoteContracts.set(key, {
+      expiresAt: Date.now() + OPTION_CATALOG_CACHE_MS,
+      value: request,
+    })
     return request
   }
 
@@ -580,16 +648,7 @@ export class OptionChains {
     const requestedContractId = positiveContractId(contract.brokerContractId)
     if (requestedContractId !== undefined) query.conId = requestedContractId
     const details = await this.requests.requestContractDetails(query)
-    const match =
-      requestedContractId === undefined
-        ? details.find((item) => item.contract?.conId != null)
-        : details.find((item) => Number(item.contract?.conId) === requestedContractId)
-    if (!match?.contract?.conId) {
-      throw new RequestError(
-        404,
-        `IBKR contract was not found for ${contract.underlying} ${contract.expiration} ${contract.strike} ${contract.right}`,
-      )
-    }
+    const match = selectExactOptionDetails(details, query)
     const route = contract.route || contract.exchange || match.contract.exchange || 'SMART'
     const priceIncrements = await this.priceIncrementsFor(match, route)
     return {
@@ -607,21 +666,14 @@ export class OptionChains {
     details: ContractDetails,
     exchange: string,
   ): Promise<PriceIncrement[] | undefined> {
-    const exchanges = String(details.validExchanges ?? '')
-      .split(',')
-      .map((value) => value.trim().toUpperCase())
-    const ids = String(details.marketRuleIds ?? '')
-      .split(',')
-      .map((value) => Number(value.trim()))
-    const index = exchanges.indexOf(exchange.trim().toUpperCase())
-    const marketRuleId = index >= 0 ? ids[index] : ids.length === 1 ? ids[0] : undefined
-    if (!Number.isSafeInteger(marketRuleId) || Number(marketRuleId) <= 0) return undefined
+    const id = selectedMarketRuleId(details, exchange ?? details.contract.exchange)
+    if (id === undefined) return undefined
     try {
-      return await this.requests.requestMarketRule(Number(marketRuleId))
+      return authoritativePriceIncrements(await this.requests.requestMarketRule(id))
     } catch (error) {
       this.store.addDiagnostic(
         'warning',
-        error instanceof Error ? error.message : `IBKR market rule ${marketRuleId} is unavailable`,
+        error instanceof Error ? error.message : `IBKR market rule ${id} is unavailable`,
       )
       return undefined
     }

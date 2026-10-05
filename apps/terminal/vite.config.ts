@@ -1,8 +1,56 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import react from '@vitejs/plugin-react'
 import { defineConfig, loadEnv, type Plugin, searchForWorkspaceRoot } from 'vite'
+import { APP_NAME } from './src/branding.js'
+import { LEGAL_DOCUMENTS } from './src/legal-documents.js'
+
+function bundledLegalNoticesPlugin(legalDirectory: string): Plugin {
+  return {
+    name: 'terminal-bundled-legal-notices',
+    configureServer(server) {
+      server.middlewares.use('/legal', async (request, response) => {
+        const pathname = (request.url ?? '/').split('?', 1)[0]
+        const document = LEGAL_DOCUMENTS.find(([, file]) => pathname === `/${file}`)
+        if (!document) {
+          response.statusCode = 404
+          response.end('Document not found.')
+          return
+        }
+        if (request.method !== 'GET' && request.method !== 'HEAD') {
+          response.statusCode = 405
+          response.setHeader('Allow', 'GET, HEAD')
+          response.end()
+          return
+        }
+        try {
+          const contents = await readFile(path.join(legalDirectory, document[1]))
+          response.setHeader('Content-Type', 'text/plain; charset=utf-8')
+          response.setHeader('X-Content-Type-Options', 'nosniff')
+          response.setHeader('Cache-Control', 'no-store')
+          response.end(request.method === 'HEAD' ? undefined : contents)
+        } catch {
+          response.statusCode = 404
+          response.end('Document unavailable.')
+        }
+      })
+    },
+  }
+}
+
+function terminalBrandingPlugin(): Plugin {
+  return {
+    name: 'terminal-branding',
+    transformIndexHtml(html) {
+      const title = APP_NAME.replace(/[&<>]/gu, (character) =>
+        character === '&' ? '&amp;' : character === '<' ? '&lt;' : '&gt;',
+      )
+      return html.replace('__TERMINAL_NAME__', title)
+    },
+  }
+}
 
 const SOURCE_DEVELOPMENT_SDK_ID = 'virtual:tradescript-source-development-sdk'
 const RESOLVED_SOURCE_DEVELOPMENT_SDK_ID = `\0${SOURCE_DEVELOPMENT_SDK_ID}`
@@ -116,7 +164,17 @@ export default defineConfig(({ command, mode }) => {
   })()
 
   return {
-    plugins: [react(), sourceDevelopmentSdkPlugin(sourceSdkRoot)],
+    ...(environment.TERMINAL_VITE_CACHE_DIR?.trim()
+      ? { cacheDir: path.resolve(repositoryRoot, environment.TERMINAL_VITE_CACHE_DIR) }
+      : {}),
+    plugins: [
+      react(),
+      terminalBrandingPlugin(),
+      sourceDevelopmentSdkPlugin(sourceSdkRoot),
+      bundledLegalNoticesPlugin(
+        path.join(repositoryRoot, 'apps/desktop/src-tauri/runtime/web/legal'),
+      ),
+    ],
     define: {
       'import.meta.env.VITE_TRADESCRIPT_SDK_SOURCE_MODE': JSON.stringify(
         sourceSdkRoot !== undefined,

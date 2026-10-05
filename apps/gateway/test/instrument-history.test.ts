@@ -27,12 +27,7 @@ it.each([
     Object.assign(ib, { reqHistoricalData, cancelHistoricalData: vi.fn() })
     const store = new BrokerStateStore()
     store.setConnectionStatus('connected')
-    const service = new IbkrService(
-      createBridgeConfig(loadGatewayConfig({})),
-      store,
-      ib as IBApi,
-      false,
-    )
+    const service = new IbkrService(createBridgeConfig(loadGatewayConfig({})), store, ib as IBApi)
     const { bars } = await service.loadBars({
       symbol: 'IBKR:123',
       assetClass,
@@ -84,12 +79,7 @@ it('returns no more than the requested number of newest historical bars', async 
   })
   const store = new BrokerStateStore()
   store.setConnectionStatus('connected')
-  const service = new IbkrService(
-    createBridgeConfig(loadGatewayConfig({})),
-    store,
-    ib as IBApi,
-    false,
-  )
+  const service = new IbkrService(createBridgeConfig(loadGatewayConfig({})), store, ib as IBApi)
 
   const { bars, hasOlder } = await service.loadBars({
     symbol: 'AAPL',

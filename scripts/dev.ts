@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { developmentEnvironment } from './dev-environment.js'
 import { isolatedMockEnvironment } from './isolated-mock.js'
 
 const capability = randomBytes(32).toString('base64url')
@@ -7,10 +8,11 @@ const isolated = process.argv.includes('--isolated-mock')
   ? await isolatedMockEnvironment(Number(process.env.MOCK_E2E_PORT))
   : undefined
 const childEnvironment = {
-  ...process.env,
+  ...(isolated ? process.env : developmentEnvironment()),
   ...isolated?.environment,
   INTERNAL_PROXY_CAPABILITY: capability,
 }
+delete childEnvironment.TRADESCRIPT_NPM_TOKEN
 if (isolated) {
   delete childEnvironment.WIDGET_IBKR_ENABLE_LIVE_ORDERS
   delete childEnvironment.TERMINAL_DESKTOP

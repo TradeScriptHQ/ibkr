@@ -15,9 +15,12 @@ export class MarketDataConnectionTracker {
     if (code === 1100) this.upstreamLost = true
     else if (code === 1101 || code === 1102) this.upstreamLost = false
     else if (code === 2103 || code === 2104 || code === 2108) {
-      // IBKR identifies the affected farm after the final colon. Idle farms are available.
-      const farm = message.slice(message.lastIndexOf(':') + 1).trim()
-      this.farms.set(farm, code !== 2103)
+      const prefix =
+        code === 2108
+          ? /market data farm connection is inactive(?: but should be available upon demand)?[:.]\s*([\w-]+(?:\.[\w-]+)*)\.?\s*$/i
+          : /market data farm connection is (?:broken|OK):\s*([\w-]+(?:\.[\w-]+)*)\.?\s*$/i
+      const farm = prefix.exec(message)?.[1]
+      if (farm) this.farms.set(farm, code !== 2103)
     } else return undefined
     const failed = [...this.farms].filter(([, available]) => !available).map(([farm]) => farm)
     if (this.upstreamLost)

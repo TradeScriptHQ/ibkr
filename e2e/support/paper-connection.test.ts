@@ -8,8 +8,20 @@ const connection: ConnectionSnapshot = {
   settings: {
     active: 'paper',
     profiles: {
-      paper: { port: 7497, clientId: 1, permission: 'manual', allowedAccountIds: ['DU-TEST'] },
-      live: { port: 7496, clientId: 1, permission: 'read-only', allowedAccountIds: [] },
+      paper: {
+        connectionType: 'tws',
+        port: 7497,
+        clientId: 1,
+        agentTradingEnabled: false,
+        allowedAccountIds: ['DU-TEST'],
+      },
+      live: {
+        connectionType: 'tws',
+        port: 7496,
+        clientId: 1,
+        agentTradingEnabled: false,
+        allowedAccountIds: [],
+      },
     },
   },
 }

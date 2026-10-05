@@ -65,6 +65,7 @@ function fixture() {
         currency: 'USD',
       },
       timeZoneId: 'US/Eastern',
+      priceMagnifier: 100,
       validExchanges: 'SMART,NASDAQ',
       marketRuleIds: '26,26',
     } as ContractDetails,
@@ -73,6 +74,40 @@ function fixture() {
 }
 
 describe('IBKR session calendar', () => {
+  it('retains native quotation metadata without inventing a monetary conversion', async () => {
+    const { service } = fixture()
+    const details = await service.getInstrumentDetails({
+      symbol: 'AAPL',
+      exchange: 'SMART',
+      primaryExchange: 'NASDAQ',
+      currency: 'USD',
+      assetClass: 'stock',
+    })
+    expect(details).toMatchObject({
+      nativePriceMagnifier: 100,
+      nativeValidExchanges: 'SMART,NASDAQ',
+      nativeMarketRuleIds: '26,26',
+      priceIncrements: [
+        { lowEdge: 0, increment: 0.01 },
+        { lowEdge: 1, increment: 0.05 },
+      ],
+    })
+    expect(details.symbol.currency).toBe('USD')
+    expect(details.nativeContractMultiplier).toBeUndefined()
+    const session = await service.resolveSession({
+      symbol: 'AAPL',
+      exchange: 'SMART',
+      primaryExchange: 'NASDAQ',
+      currency: 'USD',
+      assetClass: 'stock',
+    })
+    expect(session.metadata).toHaveProperty('monetaryValueAvailable', false)
+    expect(session.metadata).toHaveProperty(
+      'monetaryValueUnavailableReason',
+      expect.stringMatching(/monetary units.*unavailable/iu),
+    )
+  })
+
   it('does not label a trading segment regular without overlapping liquid-hours evidence', () => {
     expect(
       deriveSessionWindows(
@@ -139,7 +174,7 @@ describe('IBKR session calendar', () => {
       timezone: 'America/New_York',
       coverage: {
         startTime: Date.parse('2026-09-10T04:00:00Z'),
-        endTime: Date.parse('2026-09-12T04:00:00Z'),
+        endTime: Date.parse('2026-09-11T15:27:25Z'),
       },
       windows: [
         {

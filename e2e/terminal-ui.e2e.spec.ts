@@ -1,28 +1,19 @@
-import type { BrokerState } from '@ibkr-terminal/contracts'
+import type { OptionChainResult } from '@ibkr-terminal/contracts'
+import type { Page } from '@playwright/test'
+import { currentAccountPanelMismatches } from './support/account-panel-check.js'
 import { expect, test } from './support/fixtures.js'
+import { resolveUsStock, select } from './support/instrument-contracts.js'
 import { browserHeaders, expectJsonOk, openTerminalSession } from './support/session.js'
 
-function formatMoney(value: number | undefined, currency: string | undefined): string {
-  if (!currency) throw new Error('TWS did not supply an amount currency')
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(
-    requireBrokerNumber(value),
-  )
-}
-
-function formatSignedMoney(amount: number | undefined, currency: string | undefined): string {
-  const value = requireBrokerNumber(amount)
-  const formatted = formatMoney(value, currency)
-  return value > 0 ? `+${formatted}` : formatted
-}
-
-function requireBrokerNumber(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value))
-    throw new Error('TWS did not supply a finite account amount')
-  return value
-}
-
-function parseDisplayedNumber(value: string): number {
-  return Number(value.replace(/[^\d,.-]/gu, '').replaceAll(',', ''))
+async function selectAppleOptionClass(page: Page) {
+  const chain = page.getByRole('tabpanel', { name: /Options Chain/u })
+  const selector = chain.getByRole('combobox', { name: 'Trading class', exact: true })
+  await expect(selector).toBeVisible()
+  await selector.click()
+  const standard = page.getByRole('option', { name: /^AAPL\b/u })
+  await expect(standard).toHaveCount(1)
+  await standard.click()
+  await expect(selector).toContainText(/^AAPL\b/u)
 }
 
 test.describe('TradeScript terminal UI', () => {
@@ -202,6 +193,7 @@ test.describe('TradeScript terminal UI', () => {
     await page.getByRole('tab', { name: /Options Chain/u }).click()
     const chain = page.getByRole('tabpanel', { name: /Options Chain/u })
     await expect(chain).toBeVisible()
+    await selectAppleOptionClass(page)
     await expect(chain.getByText('Calls', { exact: true })).toBeVisible({
       timeout: 60_000,
     })
@@ -230,7 +222,9 @@ test.describe('TradeScript terminal UI', () => {
     await page.getByRole('tab', { name: /Order Book/u }).click()
     const book = page.getByRole('tabpanel', { name: /Order Book/u })
     await expect(book).toBeVisible()
-    const bookUnavailable = book.getByText(/Need additional market data permissions/u)
+    const bookUnavailable = book.getByText(
+      /Need additional market data permissions|Waiting for .+ market depth from IBKR\.|.+ market depth has not responded\. Availability is unknown\./u,
+    )
     await expect(
       book.getByText('Best bid', { exact: true }).or(bookUnavailable).first(),
     ).toBeVisible()
@@ -265,151 +259,21 @@ test.describe('TradeScript terminal UI', () => {
   })
 
   test('reconciles every current Account panel value with live broker state', async ({ page }) => {
-    const readState = (): Promise<BrokerState> =>
-      page.evaluate(async () => {
-        const response = await fetch('/api/v1/ibkr/state', {
-          headers: { 'x-tradescript-client': 'terminal-v1' },
+    const accountPanel = page.getByRole('region', { name: 'Portfolio & Activity' })
+    const verify = async (phase: 'summary' | 'account' | 'position-pnl') => {
+      await expect
+        .poll(() => page.evaluate(currentAccountPanelMismatches, phase), {
+          timeout: 45_000,
+          intervals: [300, 500, 1_000],
+          message: 'Fresh broker, native SDK and rendered account facts must agree',
         })
-        if (!response.ok) throw new Error(`State request failed with ${response.status}`)
-        return response.json()
-      })
-
-    await expect
-      .poll(
-        async () => {
-          const state = await readState()
-          const account = state.accounts.find((candidate) => candidate.id === state.activeAccountId)
-          return [
-            account?.cash,
-            account?.netLiquidation,
-            account?.buyingPower,
-            account?.availableFunds,
-            account?.marginUsed,
-            account?.maintenanceMargin,
-          ].every((value) => Number.isFinite(value))
-        },
-        { timeout: 45_000 },
-      )
-      .toBe(true)
-
-    const state = await readState()
-    const brokerAccount = state.accounts.find((candidate) => candidate.id === state.activeAccountId)
-    if (!brokerAccount) throw new Error('TWS returned no active account')
-    const accountPanel = page.getByRole('region', {
-      name: 'Portfolio & Activity',
-    })
-    const currency = brokerAccount.currency
-
-    await expect(accountPanel).toContainText(formatMoney(brokerAccount.cash, currency))
-    await expect(accountPanel).toContainText(formatMoney(brokerAccount.netLiquidation, currency))
-    await expect(accountPanel).toContainText(formatMoney(brokerAccount.buyingPower, currency))
-    await expect(accountPanel).toContainText(formatMoney(brokerAccount.marginUsed, currency))
-
+        .toEqual([])
+    }
+    await verify('summary')
     await accountPanel.getByRole('button', { name: /^Account \(\d+\)$/u }).click()
-    for (const [label, value] of [
-      ['Cash', brokerAccount.cash],
-      ['Net Liquidation', brokerAccount.netLiquidation],
-      ['Buying Power', brokerAccount.buyingPower],
-      ['Available Funds', brokerAccount.availableFunds],
-      ['Initial Margin Requirement', brokerAccount.marginUsed],
-      ['Maintenance Margin Requirement', brokerAccount.maintenanceMargin],
-    ] as const) {
-      await expect(
-        accountPanel.getByRole('row', {
-          name: `${label} ${formatMoney(value, currency)}`,
-          exact: true,
-        }),
-      ).toBeVisible()
-    }
-
-    for (const [label, value] of [
-      ['Daily P&L', brokerAccount.dailyPnl],
-      ['Unrealized P&L', brokerAccount.unrealizedPnl],
-      ['Realized P&L', brokerAccount.realizedPnl],
-    ] as const) {
-      const labelCell = accountPanel.getByRole('cell', { name: label, exact: true })
-      if (value === undefined) {
-        // The account adapter omits unavailable P&L rows instead of inventing zeroes.
-        await expect(labelCell).toHaveCount(0)
-        continue
-      }
-      const row = labelCell.locator('..')
-      await expect(row).toBeVisible()
-      const renderedValue = await row.getByRole('cell').last().innerText()
-      expect(renderedValue).toContain(
-        new Intl.NumberFormat('en-US', { style: 'currency', currency })
-          .formatToParts(0)
-          .find((part) => part.type === 'currency')?.value,
-      )
-      expect(parseDisplayedNumber(renderedValue)).toBeCloseTo(value, 2)
-    }
-
-    if (
-      [brokerAccount.dailyPnl, brokerAccount.unrealizedPnl, brokerAccount.realizedPnl].every(
-        (value) => value === undefined,
-      )
-    ) {
-      await expect(accountPanel.getByText('No account P&L', { exact: true })).toBeVisible()
-    }
-
-    const availableFundsRatio =
-      (requireBrokerNumber(brokerAccount.availableFunds) /
-        requireBrokerNumber(brokerAccount.netLiquidation)) *
-      100
-    const buyingPowerRatio =
-      (requireBrokerNumber(brokerAccount.buyingPower) /
-        requireBrokerNumber(brokerAccount.netLiquidation)) *
-      100
-    await expect(
-      accountPanel.getByRole('row', {
-        name: `Available Funds / Net Liquidation ${availableFundsRatio.toFixed(2)}%`,
-        exact: true,
-      }),
-    ).toBeVisible()
-    await expect(
-      accountPanel.getByRole('row', {
-        name: `Buying Power / Net Liquidation ${buyingPowerRatio.toFixed(2)}%`,
-        exact: true,
-      }),
-    ).toBeVisible()
-
-    for (const position of state.positions.filter(
-      (candidate) => candidate.accountId === brokerAccount.id,
-    )) {
-      await expect(
-        accountPanel.getByRole('row', {
-          name: `${position.symbol.symbol} ${formatMoney(position.marketValue, position.symbol.currency)} ${Math.abs(position.quantity)}`,
-          exact: true,
-        }),
-      ).toBeVisible()
-    }
-
-    const mixedCurrencyPosition = state.positions.find(
-      (position) =>
-        position.accountId === brokerAccount.id &&
-        position.pnlCurrency &&
-        position.pnlCurrency !== position.symbol.currency &&
-        Number.isFinite(position.unrealizedPnl),
-    )
-    if (mixedCurrencyPosition) {
-      await accountPanel.getByRole('button', { name: /^Positions \(\d+\)$/u }).click()
-      const rowText = await accountPanel
-        .getByRole('row')
-        .filter({ hasText: mixedCurrencyPosition.symbol.symbol })
-        .last()
-        .innerText()
-      const correctPnl = formatSignedMoney(
-        mixedCurrencyPosition.unrealizedPnl,
-        mixedCurrencyPosition.pnlCurrency,
-      )
-      if (!rowText.includes(correctPnl)) {
-        test.info().annotations.push({
-          type: 'sdk-bug',
-          description:
-            'TradeScript 0.1.4 has one position currency field, so it cannot render quote-currency prices and base-currency P&L correctly together.',
-        })
-      }
-    }
+    await verify('account')
+    await accountPanel.getByRole('button', { name: /^Positions \(\d+\)$/u }).click()
+    await verify('position-pnl')
   })
 
   test('has no horizontal document overflow at workstation and laptop sizes', async ({ page }) => {
@@ -433,7 +297,10 @@ test.describe('TradeScript terminal UI', () => {
 
 test('fundamentals can be closed and added through the workspace menu and follows the selected symbol', async ({
   page,
+  request,
 }) => {
+  await openTerminalSession(request)
+  const microsoft = await resolveUsStock(request, 'MSFT')
   await page.goto('/')
   const tab = page.getByRole('tab').filter({ hasText: 'Fundamentals' })
   await expect(tab).toBeVisible({ timeout: 60_000 })
@@ -451,13 +318,20 @@ test('fundamentals can be closed and added through the workspace menu and follow
   await page.getByRole('menuitem', { name: 'Fundamentals', exact: true }).click()
   await expect(tab).toBeVisible()
   await expect(panel).toContainText('APPLE INC')
-  const response = page.waitForResponse(
-    (item) => item.url().includes('/instrument-details?symbol=MSFT') && item.ok(),
-  )
-  await page
-    .getByRole('region', { name: 'Markets', exact: true })
-    .getByText('MSFT', { exact: true })
-    .click()
+  await page.getByRole('tab', { name: /IBKR Chart/u }).click()
+  const response = page.waitForResponse((item) => {
+    const url = new URL(item.url())
+    return (
+      item.ok() &&
+      url.pathname.endsWith('/instrument-details') &&
+      url.searchParams.get('symbol') === (microsoft.brokerSymbol ?? microsoft.ticker) &&
+      url.searchParams.get('assetClass') === microsoft.type &&
+      url.searchParams.get('exchange') === microsoft.exchange &&
+      url.searchParams.get('primaryExchange') === microsoft.primaryExchange &&
+      url.searchParams.get('currency') === microsoft.currency
+    )
+  })
+  await select(page, 'MSFT', 'Stocks', microsoft, { navigate: false, chooseExchange: false })
   await response
   await tab.click()
   await expect(panel).toContainText('MICROSOFT')
@@ -470,16 +344,29 @@ test('fundamentals can be closed and added through the workspace menu and follow
   await expect(panel).not.toContainText('APPLE INC')
 })
 
-test('the installed SDK refreshes the selected option query without switching expiry', async ({
+test('the native SDK streams the selected option query without switching expiry', async ({
   page,
+  request,
 }) => {
   test.setTimeout(120_000)
   const requests: string[] = []
   page.on('request', (request) => {
     const url = new URL(request.url())
-    if (url.pathname.endsWith('/options/chain') && url.searchParams.has('expiration'))
+    if (url.pathname.endsWith('/options/chain/events') && url.searchParams.has('expiration'))
       requests.push(request.url())
   })
+  await openTerminalSession(request)
+  const calendar = await expectJsonOk<OptionChainResult>(
+    await request.get(
+      '/api/v1/ibkr/options/chain?underlying=AAPL&tradingClass=AAPL&includeTradingClasses=true&currency=USD&underlyingAssetClass=stock&underlyingExchange=SMART',
+      { headers: browserHeaders },
+    ),
+  )
+  const expiration = calendar.expirations
+    .map((item) => item.expiration)
+    .filter((date) => Date.parse(date) > Date.now() + 4 * 86400_000)
+    .sort()[0]
+  if (!expiration) throw new Error('No future native AAPL option expiry is available')
   await page.goto('/')
   await expect(page.locator('.terminal-host')).toHaveAttribute(
     'data-trading-operation-support',
@@ -488,16 +375,63 @@ test('the installed SDK refreshes the selected option query without switching ex
   )
   await page.getByRole('tab', { name: /Options Chain/u }).click()
   const chain = page.getByRole('tabpanel', { name: /Options Chain/u })
+  const defaultStream = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return (
+      url.pathname.endsWith('/options/chain/events') &&
+      url.searchParams.get('tradingClass') === 'AAPL' &&
+      url.searchParams.has('expiration')
+    )
+  })
+  await selectAppleOptionClass(page)
+  const initialStream = await defaultStream
+  expect(initialStream.status()).toBe(200)
+  const initialExpiration = new URL(initialStream.url()).searchParams.get('expiration')
+  const catalogDay = new Date().toISOString().slice(0, 10)
+  const eligibleDefault = calendar.expirations
+    .map((item) => item.expiration)
+    .filter((date) => date > catalogDay)
+    .sort()[0]
+  expect(
+    eligibleDefault,
+    'Native date-only catalog must contain an eligible future date',
+  ).toBeDefined()
+  expect(
+    initialExpiration,
+    'Class selection must automatically stream the earliest eligible future date',
+  ).toBe(eligibleDefault)
   await expect(chain.getByText('Calls', { exact: true })).toBeVisible({ timeout: 60_000 })
-  await expect.poll(() => requests.length, { timeout: 30_000 }).toBeGreaterThanOrEqual(3)
-  const latest = requests.slice(-3)
-  expect(new Set(latest).size).toBe(1)
+  const label = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  }).format(new Date(expiration))
+  requests.length = 0
+  const stream = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return (
+      url.pathname.endsWith('/options/chain/events') &&
+      url.searchParams.get('tradingClass') === 'AAPL' &&
+      url.searchParams.get('expiration') === expiration
+    )
+  })
+  await chain.getByRole('button', { name: new RegExp(`^${label}\\b`, 'u') }).click()
+  const response = await stream
+  expect(response.status()).toBe(200)
+  expect(response.headers()['content-type']).toContain('text/event-stream')
+  await page.waitForTimeout(5_000)
+  const latest = [...requests]
+  expect(latest.length).toBeGreaterThan(0)
+  expect(new Set(latest.map((url) => new URL(url).searchParams.get('expiration')))).toEqual(
+    new Set([expiration]),
+  )
   const first = latest[0]
   if (!first) throw new Error('No refreshed option query was observed')
   const query = new URL(first).searchParams
+  expect(query.get('tradingClass')).toBe('AAPL')
   expect(Number(query.get('maxQuoteContracts'))).toBeGreaterThan(0)
   expect(Number(query.get('centerPrice'))).toBeGreaterThan(0)
-  await test.info().attach('repeated-option-query', {
+  await test.info().attach('selected-option-stream', {
     body: JSON.stringify(latest),
     contentType: 'application/json',
   })

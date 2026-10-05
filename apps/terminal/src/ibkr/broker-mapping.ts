@@ -47,7 +47,7 @@ export function toTradingState(
     orders: state.orders.map(toTradingOrder),
     ordersHistory: state.ordersHistory?.map(toTradingOrder),
     positions: state.positions.map(toTradingPosition),
-    executions: state.executions.map(toTradingExecution),
+    executions: toTradingExecutions(state.executions),
     messages: state.messages.map((message) => ({
       id: message.id,
       type: message.level,
@@ -98,7 +98,7 @@ export function toTradingEvent(
   if (event.type === 'executions')
     return withoutUndefined<TradingEvent | undefined>({
       type: 'executions',
-      executions: event.executions.map(toTradingExecution),
+      executions: toTradingExecutions(event.executions),
     })
   if (event.type === 'quotes' || event.type === 'market-depth') return undefined
   if (event.type === 'diagnostic')
@@ -166,7 +166,7 @@ function toTradingAccount(
       supportsMultipleExitLevels: providerName !== 'Alpaca',
       supportsUnpairedExitLevels: true,
       supportsStopLoss: true,
-      supportsTrailingStop: true,
+      supportsTrailingStop: false,
       supportsGuaranteedStop: false,
       orderTicketCustomFields:
         providerName === 'Alpaca' ? [] : [...IBKR_ORDER_TICKET_CUSTOM_FIELDS],
@@ -197,6 +197,7 @@ export function toTradingOrder(order: BackendOrder): TradingOrder {
       : (order.customFields?.orderVisibility ?? 'visible')
   return withoutUndefined<TradingOrder>({
     id: order.id,
+    pipSize: order.symbol.pipDefinition?.pipSize,
     accountId: order.accountId ?? '',
     symbol: toSdkSymbolInfo(order.symbol),
     customFields: {
@@ -239,6 +240,8 @@ export function toTradingOrder(order: BackendOrder): TradingOrder {
     metadata: {
       brokerStatus: order.status,
       brokerMessage: order.message,
+      nativeAssetClass: order.symbol.assetClass,
+      nativeContractIdentity: order.symbol.contractIdentity,
       ...(transmission.held ? { transmissionStatus: 'held', requiresTwsAttention: true } : {}),
     },
     parentId: order.parentId,
@@ -263,6 +266,7 @@ export function toTradingOrder(order: BackendOrder): TradingOrder {
 function toTradingPosition(position: BackendPosition): TradingPosition {
   return withoutUndefined<TradingPosition>({
     id: position.id,
+    pipSize: position.symbol.pipDefinition?.pipSize,
     accountId: position.accountId,
     symbol: toSdkSymbolInfo(position.symbol),
     side: position.quantity > 0 ? 'long' : position.quantity < 0 ? 'short' : 'flat',
@@ -278,16 +282,33 @@ function toTradingPosition(position: BackendPosition): TradingPosition {
       : undefined,
     unrealizedPnl: position.unrealizedPnl,
     realizedPnl: position.realizedPnl,
+    pnlCurrency: position.pnlCurrency,
     currency: position.symbol.currency ?? 'USD',
     customFields: {
       assetClass: position.symbol.assetClass,
       marketValue: position.marketValue,
       pnlCurrency: position.pnlCurrency,
     },
+    metadata: {
+      nativeAssetClass: position.symbol.assetClass,
+      nativeContractIdentity: position.symbol.contractIdentity,
+    },
   })
 }
 
-function toTradingExecution(execution: BackendExecution): TradingState['executions'][number] {
+function toTradingExecutions(executions: BackendExecution[]): TradingState['executions'] {
+  return executions.flatMap((execution) => {
+    const mapped = toTradingExecution(execution)
+    return mapped === undefined ? [] : [mapped]
+  })
+}
+
+function toTradingExecution(
+  execution: BackendExecution,
+): TradingState['executions'][number] | undefined {
+  const time = Date.parse(execution.timestamp)
+  // The SDK requires a timestamp. Keep untimed fills in backend state without inventing a marker time.
+  if (!Number.isFinite(time)) return undefined
   return withoutUndefined<TradingState['executions'][number]>({
     id: execution.id,
     accountId: execution.accountId ?? '',
@@ -300,7 +321,7 @@ function toTradingExecution(execution: BackendExecution): TradingState['executio
     side: execution.side,
     quantity: execution.quantity,
     price: execution.price,
-    time: Date.parse(execution.timestamp),
+    time,
     currency: execution.symbol.currency ?? 'USD',
     metadata: {
       assetClass: execution.symbol.assetClass,
@@ -431,6 +452,8 @@ function toSdkSymbolInfo(symbol: BackendSymbol): SymbolInfo {
     ticker: symbol.symbol,
     canonicalSymbol: symbol.canonicalSymbol,
     brokerSymbol: [
+      'option',
+      'futures-option',
       'futures',
       'index',
       'fund',
@@ -439,6 +462,9 @@ function toSdkSymbolInfo(symbol: BackendSymbol): SymbolInfo {
       'warrant',
       'commodity',
       'cfd',
+      'unknown',
+      'option-combo',
+      'continuous-futures',
     ].includes(symbol.assetClass ?? '')
       ? symbol.canonicalSymbol
       : symbol.symbol,

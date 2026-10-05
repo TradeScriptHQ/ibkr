@@ -1,3 +1,4 @@
+import type { BrokerAccountCurrencyConversion } from '@ibkr-terminal/contracts'
 import type {
   SymbolInfo,
   TradingAccountManagerInfo,
@@ -6,6 +7,7 @@ import type {
   TradingEquityRequest,
   TradingEvent,
   TradingExecutionEnvironment,
+  TradingFinancialMutationOptions,
   TradingMarginAvailableRequest,
   TradingOptionContractResolution,
   TradingOrder,
@@ -18,6 +20,7 @@ import type {
   TradingPlaceOrderResult,
   TradingPositionCloseOptions,
   TradingPositionPreviewResult,
+  TradingPreviewSection,
   TradingResolveOptionContractRequest,
   TradingState,
   TradingSuggestedQuantityRequest,
@@ -51,7 +54,7 @@ import {
   SUPPORTED_ORDER_RULES,
   supportsIbkrIceberg,
 } from './broker-order-rules.js'
-import { gatewayRequest } from './broker-request.js'
+import { GatewayRequestError, gatewayRequest } from './broker-request.js'
 import { withoutUndefined } from './defined-fields.js'
 import {
   readOrderTicketSettings,
@@ -74,7 +77,11 @@ type BrokerTradingSymbolRules = {
   orderTypes?: string | undefined
   supportedDurations: NonNullable<TradingSymbolInfo['supportedDurations']>
   priceStep?: number | undefined
+  pipSize?: number | undefined
+  monetaryValueAvailable?: boolean | undefined
+  monetaryValueUnavailableReason?: string | undefined
   priceIncrements?: Array<{ lowEdge: number; increment: number }> | undefined
+  routingDestination?: string | undefined
   minQuantity?: number | undefined
   quantityStep?: number | undefined
   contractMultiplier?: number | undefined
@@ -98,6 +105,9 @@ export interface IbkrHttpBrokerAdapterOptions {
 export interface IbkrHttpBrokerAdapter extends TradingBrokerAdapter {
   getHealth(): Promise<BackendHealth>
 }
+
+const CANCEL_ACK_TIMEOUT_MS = 10_000
+const CANCEL_ACK_POLL_MS = 250
 
 export function createIbkrHttpBrokerAdapter(
   options: IbkrHttpBrokerAdapterOptions = {},
@@ -129,8 +139,15 @@ export function createIbkrHttpBrokerAdapter(
   }>()
   const symbolRulesCache = new Map<string, { expiresAt: number; value: BrokerTradingSymbolRules }>()
   const symbolRulesInflight = new Map<string, Promise<BrokerTradingSymbolRules>>()
+  const currencyConversionInflight = new Map<
+    string,
+    Promise<TradingSymbolInfo['accountCurrencyConversion']>
+  >()
   let eventSource: EventSource | null = null
+  let eventSourceCleanup: (() => void) | undefined
   let lastState: TradingState | null = null
+  let stateRevision = 0
+  let stateGeneration = 0
   let executionEnvironment: TradingExecutionEnvironment | undefined = options.executionEnvironment
   let mutationAuthorityInvalidated = false
 
@@ -217,8 +234,11 @@ export function createIbkrHttpBrokerAdapter(
     publishEquity()
   }
 
-  const getBrokerSymbolRules = async (symbol: SymbolInfo): Promise<BrokerTradingSymbolRules> => {
-    const path = brokerSessionPath(symbol)
+  const getBrokerSymbolRules = async (
+    symbol: SymbolInfo,
+    routingDestination?: string,
+  ): Promise<BrokerTradingSymbolRules> => {
+    const path = brokerSessionPath(symbol, routingDestination)
     const cached = symbolRulesCache.get(path)
     if (cached && cached.expiresAt > Date.now()) return cached.value
     const existing = symbolRulesInflight.get(path)
@@ -227,6 +247,8 @@ export function createIbkrHttpBrokerAdapter(
       symbol?:
         | {
             minTick?: number | undefined
+            exchange?: string | undefined
+            pipDefinition?: { pipSize: number } | undefined
             priceIncrements?: Array<{ lowEdge: number; increment: number }> | undefined
           }
         | undefined
@@ -236,6 +258,8 @@ export function createIbkrHttpBrokerAdapter(
             orderTypes?: string | undefined
             quantityStep?: number | undefined
             contractMultiplier?: number | undefined
+            monetaryValueAvailable?: boolean | undefined
+            monetaryValueUnavailableReason?: string | undefined
             supportedDurations?: TradingSymbolInfo['supportedDurations'] | undefined
             routingDestinations?: TradingSymbolInfo['routingDestinations'] | undefined
             defaultRoutingDestination?: string | undefined
@@ -246,14 +270,19 @@ export function createIbkrHttpBrokerAdapter(
     }>(baseUrl, path)
       .then((session) => {
         const brokerDurations = session.metadata?.supportedDurations
+        const priceIncrements = authoritativePriceIncrements(session.symbol?.priceIncrements)
+        const ruleRoute = routingDestination ?? symbol.exchange ?? session.symbol?.exchange
         const value = {
           orderTypes: session.metadata?.orderTypes,
           supportedDurations: brokerDurations?.length ? brokerDurations : SUPPORTED_DURATIONS,
-          priceStep: positiveStep(session.symbol?.minTick) ?? priceStepFromSymbol(symbol),
-          priceIncrements: session.symbol?.priceIncrements,
+          priceIncrements,
+          routingDestination: priceIncrements ? ruleRoute?.trim().toUpperCase() : undefined,
+          pipSize: positiveStep(session.symbol?.pipDefinition?.pipSize),
           minQuantity: positiveStep(session.metadata?.minQuantity),
           quantityStep: positiveStep(session.metadata?.quantityStep),
           contractMultiplier: positiveStep(session.metadata?.contractMultiplier),
+          monetaryValueAvailable: session.metadata?.monetaryValueAvailable,
+          monetaryValueUnavailableReason: session.metadata?.monetaryValueUnavailableReason,
           routingDestinations: session.metadata?.routingDestinations,
           defaultRoutingDestination: session.metadata?.defaultRoutingDestination,
           allOrNone: session.metadata?.allOrNone,
@@ -271,7 +300,9 @@ export function createIbkrHttpBrokerAdapter(
           throw error
         const value = {
           supportedDurations: SUPPORTED_DURATIONS,
-          priceStep: priceStepFromSymbol(symbol),
+          monetaryValueAvailable: false,
+          monetaryValueUnavailableReason:
+            'IBKR contract monetary units are unavailable because exact provider metadata could not be loaded.',
         }
         symbolRulesCache.set(path, {
           expiresAt: Date.now() + 15_000,
@@ -284,9 +315,61 @@ export function createIbkrHttpBrokerAdapter(
     return pending
   }
 
+  const getAccountCurrencyConversion = async (
+    context: TradingOrderContext,
+  ): Promise<TradingSymbolInfo['accountCurrencyConversion']> => {
+    if (isAlpaca || !context.accountId || !context.symbol.currency) return undefined
+    const requestGeneration = stateGeneration
+    const state = lastState ?? (await readState())
+    const toCurrency = state.accounts
+      .find((account) => account.id === context.accountId)
+      ?.currency?.trim()
+      .toUpperCase()
+    const fromCurrency = context.symbol.currency.trim().toUpperCase()
+    if (!toCurrency || fromCurrency === toCurrency) return undefined
+    const path = `/accounts/${encodeURIComponent(context.accountId)}/currency-conversion?${new URLSearchParams({ fromCurrency })}`
+    const lookupKey = `${requestGeneration}:${toCurrency}:${path}`
+    const pending = currencyConversionInflight.get(lookupKey)
+    if (pending) return pending
+    const lookup = request<BrokerAccountCurrencyConversion>(baseUrl, path)
+      .then((conversion) => {
+        if (
+          requestGeneration !== stateGeneration ||
+          lastState?.accounts
+            .find((account) => account.id === context.accountId)
+            ?.currency?.trim()
+            .toUpperCase() !== toCurrency
+        )
+          throw new Error('Broker connection or account currency changed during conversion lookup.')
+        const now = Date.now()
+        if (
+          conversion.fromCurrency !== fromCurrency ||
+          conversion.toCurrency !== toCurrency ||
+          !Number.isFinite(conversion.rate) ||
+          conversion.rate <= 0 ||
+          !Number.isFinite(conversion.asOf) ||
+          conversion.asOf > now ||
+          now - conversion.asOf > 15_000 ||
+          !conversion.source?.startsWith('ibkr-live-fx:')
+        )
+          throw new Error(
+            'Broker returned inconsistent or stale account currency conversion facts.',
+          )
+        return conversion
+      })
+      .catch((error) => {
+        // Conversion is optional metadata; absence still rejects monetary risk evaluation.
+        if (error instanceof GatewayRequestError && [404, 503, 504].includes(error.status))
+          return undefined
+        throw error
+      })
+      .finally(() => currencyConversionInflight.delete(lookupKey))
+    currencyConversionInflight.set(lookupKey, lookup)
+    return lookup
+  }
+
   const getTradingSymbolInfo = async (context: TradingOrderContext): Promise<TradingSymbolInfo> => {
     const isCrypto = context.symbol.type === 'crypto'
-    const isForex = context.symbol.type === 'forex'
     const isOption = context.symbol.type === 'option'
     const isEvent = context.symbol.type === 'event-contract'
     const isNativeContract = ['bond', 'warrant', 'commodity', 'cfd'].includes(
@@ -300,7 +383,12 @@ export function createIbkrHttpBrokerAdapter(
           supportedDurations: SUPPORTED_DURATIONS,
           priceStep: priceStepFromSymbol(context.symbol),
         }
-      : await getBrokerSymbolRules(context.symbol)
+      : await getBrokerSymbolRules(
+          context.symbol,
+          'routingDestination' in context && typeof context.routingDestination === 'string'
+            ? context.routingDestination
+            : undefined,
+        )
     const contractOrderCodes: Record<string, string> = {
       market: 'MKT',
       limit: 'LMT',
@@ -321,7 +409,7 @@ export function createIbkrHttpBrokerAdapter(
       ((context.symbol.type === 'futures' && !symbolRules.contractMultiplier) ||
         !symbolRules.minQuantity ||
         !symbolRules.quantityStep ||
-        !symbolRules.priceStep ||
+        (!symbolRules.priceStep && !symbolRules.priceIncrements) ||
         !contractRules.length)
     ) {
       throw new Error(
@@ -330,8 +418,14 @@ export function createIbkrHttpBrokerAdapter(
     }
     const supportsIceberg =
       !isAlpaca && supportsIbkrIceberg(context.symbol, symbolRules.defaultRoutingDestination)
-    const referencePrice = context.lastPrice ?? context.bid ?? context.ask
-    const routePriceStep = priceIncrementAt(symbolRules.priceIncrements, referencePrice)
+    const priceRules = withoutUndefined({
+      priceStep: symbolRules.priceStep,
+      priceIncrements: symbolRules.priceIncrements,
+      routingDestination: symbolRules.routingDestination,
+      monetaryValueAvailable: symbolRules.monetaryValueAvailable,
+      monetaryValueUnavailableReason: symbolRules.monetaryValueUnavailableReason,
+    })
+    const accountCurrencyConversion = await getAccountCurrencyConversion(context)
     return withoutUndefined<TradingSymbolInfo>({
       symbol: context.symbol,
       accountId: context.accountId,
@@ -340,10 +434,11 @@ export function createIbkrHttpBrokerAdapter(
         : (context.symbol.currency ?? context.currency),
       minQuantity: symbolRules.minQuantity ?? (isCrypto ? 0.00000001 : undefined),
       quantityStep: symbolRules.quantityStep ?? (isCrypto ? 0.00000001 : undefined),
-      priceStep: routePriceStep ?? symbolRules.priceStep ?? (isForex ? 0.0001 : undefined),
-      pipValue: isForex ? 0.0001 : undefined,
+      ...priceRules,
+      pipSize: symbolRules.pipSize,
       contractMultiplier:
         symbolRules.contractMultiplier ?? (isOption || isNativeContract ? undefined : 1),
+      accountCurrencyConversion,
       ...(supportedOrderSides ? { supportedOrderSides } : {}),
       supportedOrderTypes: isEvent
         ? ['limit']
@@ -390,7 +485,8 @@ export function createIbkrHttpBrokerAdapter(
       supportsMultipleExitLevels: !isOption && !isEvent && !isAlpaca,
       supportsUnpairedExitLevels: !isOption && !isEvent,
       supportsStopLoss: !isOption && !isEvent,
-      supportsTrailingStop: !isOption && !isEvent,
+      // Pip distance is provider/catalog authority, independent of ticks and monetary pip value.
+      supportsTrailingStop: !isOption && !isEvent && !isAlpaca && symbolRules.pipSize !== undefined,
       supportsGuaranteedStop: false,
       supportsHidden: false,
       orderTicketSettings: supportsIceberg ? IBKR_ICEBERG_TICKET_SETTINGS : undefined,
@@ -400,13 +496,40 @@ export function createIbkrHttpBrokerAdapter(
     })
   }
 
+  const closeEventSource = () => {
+    stateGeneration += 1
+    eventSourceCleanup?.()
+    eventSourceCleanup = undefined
+    eventSource?.close()
+    eventSource = null
+  }
+
   const ensureEventSource = () => {
     if (eventSource) return
     const source = new EventSource(`${baseUrl}/events`)
+    let openRevision = 0
+    let refreshing = false
+    let refreshRequested = false
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined
+    let retryDelay = 250
+    const isCurrent = () => eventSource === source
     const handleMessage = (event: MessageEvent<string>) => {
+      if (!isCurrent()) return
       const backendEvent = JSON.parse(event.data) as BackendEvent
       const tradingEvent = toTradingEvent(backendEvent, providerName, executionEnvironment)
       if (!tradingEvent) return
+      if (
+        [
+          'state',
+          'accounts',
+          'orders',
+          'orders-history',
+          'positions',
+          'executions',
+          'connection-status',
+        ].includes(tradingEvent.type)
+      )
+        stateRevision += 1
       if (tradingEvent.type === 'state') lastState = tradingEvent.state
       if (tradingEvent.type === 'accounts' && lastState) {
         lastState = withoutUndefined<TradingState>({
@@ -415,16 +538,46 @@ export function createIbkrHttpBrokerAdapter(
           activeAccountId: tradingEvent.activeAccountId ?? lastState.activeAccountId,
         })
       }
+      if (lastState) {
+        if (tradingEvent.type === 'orders')
+          lastState = { ...lastState, orders: tradingEvent.orders }
+        if (tradingEvent.type === 'orders-history')
+          lastState = { ...lastState, ordersHistory: tradingEvent.orders }
+        if (tradingEvent.type === 'positions')
+          lastState = { ...lastState, positions: tradingEvent.positions }
+        if (tradingEvent.type === 'executions')
+          lastState = { ...lastState, executions: tradingEvent.executions }
+        if (tradingEvent.type === 'connection-status')
+          lastState = { ...lastState, connectionStatus: tradingEvent.status }
+      }
       emit(tradingEvent)
       publishAccountValues()
     }
-    source.onopen = () => {
-      request<BackendState>(baseUrl, '/state')
-        .then((state) => {
-          lastState = toTradingState(state, providerName, executionEnvironment)
-          emit({ type: 'state', state: lastState })
-        })
-        .catch((error) => {
+    const refreshSnapshot = async () => {
+      if (!isCurrent()) return
+      if (refreshing) {
+        refreshRequested = true
+        return
+      }
+      if (refreshTimer !== undefined) clearTimeout(refreshTimer)
+      refreshing = true
+      refreshRequested = false
+      const requestRevision = stateRevision
+      const requestOpenRevision = openRevision
+      try {
+        const state = await request<BackendState>(baseUrl, '/state')
+        if (!isCurrent()) return
+        if (requestRevision !== stateRevision || requestOpenRevision !== openRevision) {
+          refreshRequested = true
+          return
+        }
+        stateRevision += 1
+        retryDelay = 250
+        lastState = toTradingState(state, providerName, executionEnvironment)
+        emit({ type: 'state', state: lastState })
+        publishAccountValues()
+      } catch (error) {
+        if (isCurrent()) {
           emit({
             type: 'message',
             message: {
@@ -436,7 +589,20 @@ export function createIbkrHttpBrokerAdapter(
               time: Date.now(),
             },
           })
-        })
+        }
+      } finally {
+        refreshing = false
+        if (isCurrent() && refreshRequested) {
+          refreshTimer = setTimeout(() => void refreshSnapshot(), retryDelay)
+          retryDelay = Math.min(4_000, retryDelay * 2)
+        }
+      }
+    }
+    source.onopen = () => {
+      if (!isCurrent()) return
+      stateGeneration += 1
+      openRevision += 1
+      void refreshSnapshot()
     }
     source.addEventListener('state', handleMessage)
     source.addEventListener('connection-status', handleMessage)
@@ -449,6 +615,7 @@ export function createIbkrHttpBrokerAdapter(
     source.addEventListener('message', handleMessage)
     source.addEventListener('diagnostic', handleMessage)
     source.onerror = () => {
+      if (!isCurrent()) return
       emit({
         type: 'message',
         message: {
@@ -458,7 +625,113 @@ export function createIbkrHttpBrokerAdapter(
         },
       })
     }
+    eventSourceCleanup = () => {
+      if (refreshTimer !== undefined) clearTimeout(refreshTimer)
+      source.onopen = null
+      source.onerror = null
+    }
     eventSource = source
+  }
+
+  // SDK adapter callbacks may be extracted and invoked without a receiver. Own state access in
+  // this closure so account, history and subscription callbacks do not depend on `this`.
+  const readState = async (): Promise<TradingState> => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const requestRevision = stateRevision
+      const requestGeneration = stateGeneration
+      const state = await request<BackendState>(baseUrl, '/state')
+      if (requestGeneration !== stateGeneration) {
+        throw new Error(
+          'Broker connection changed during state refresh. Retry on the current connection.',
+        )
+      }
+      if (requestRevision !== stateRevision) {
+        if (lastState) return lastState
+        continue
+      }
+      stateRevision += 1
+      lastState = toTradingState(state, providerName, executionEnvironment)
+      return lastState
+    }
+    throw new Error(
+      'Broker state changed during refresh. Retry when a current snapshot is available.',
+    )
+  }
+  const refreshFailed = (error: unknown) => {
+    emit({
+      type: 'message',
+      message: {
+        type: 'warning',
+        text: error instanceof Error ? error.message : `${providerName} account refresh failed.`,
+        time: Date.now(),
+      },
+    })
+  }
+  const accountManagerRows = async (tableRequest: TradingAccountManagerTableDataRequest) =>
+    ibkrAccountManagerRows(await readState(), tableRequest)
+
+  const waitForCancellation = async (orderId: string): Promise<void> => {
+    const deadlineAt = Date.now() + CANCEL_ACK_TIMEOUT_MS
+    const unknown = (detail: string) =>
+      Object.assign(
+        new Error(
+          `Cancellation of ${orderId} is not confirmed: ${detail}. Reconcile broker state before retrying.`,
+        ),
+        { code: 'CANCEL_OUTCOME_UNKNOWN' },
+      )
+    while (Date.now() < deadlineAt) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let state: TradingState
+      try {
+        state = await Promise.race([
+          readState(),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () => reject(unknown('the acknowledgement deadline expired')),
+              deadlineAt - Date.now(),
+            )
+          }),
+        ])
+      } catch (error) {
+        throw unknown(error instanceof Error ? error.message : 'broker state is unavailable')
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+      }
+      const order =
+        state.orders.find((candidate) => candidate.id === orderId) ??
+        state.ordersHistory?.find((candidate) => candidate.id === orderId)
+      lastState = state
+      emit({ type: 'state', state: lastState })
+      if (order?.status === 'cancelled') return
+      if (order?.status === 'filled' || order?.status === 'rejected') {
+        throw Object.assign(
+          new Error(
+            `Cancellation of ${orderId} was not confirmed; the broker order is ${order.status}.`,
+          ),
+          {
+            code: 'CANCEL_NOT_CONFIRMED',
+          },
+        )
+      }
+      if (state.connectionStatus !== 'connected')
+        throw unknown('the broker connection is unavailable')
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, Math.min(CANCEL_ACK_POLL_MS, Math.max(0, deadlineAt - Date.now()))),
+      )
+    }
+    throw unknown('the acknowledgement deadline expired')
+  }
+  const cancelOrder = async (
+    orderId: string,
+    financialOptions?: TradingFinancialMutationOptions,
+  ) => {
+    await userFacingRequest(async () => {
+      await request(baseUrl, `/orders/${encodeURIComponent(orderId)}`, {
+        method: 'DELETE',
+        body: environmentBoundBody({ ...(financialOptions ? { metadata: financialOptions } : {}) }),
+      })
+      await waitForCancellation(orderId)
+    })
   }
 
   const adapter: IbkrHttpBrokerAdapter = {
@@ -466,11 +739,7 @@ export function createIbkrHttpBrokerAdapter(
 
     async connect(nextHost) {
       const health = captureHealth(await request<BackendHealth>(baseUrl, '/health'))
-      lastState = toTradingState(
-        await request<BackendState>(baseUrl, '/state'),
-        providerName,
-        executionEnvironment,
-      )
+      lastState = await readState()
       nextHost.setState(lastState)
       if (subscribers.size > 0) ensureEventSource()
       return {
@@ -483,8 +752,7 @@ export function createIbkrHttpBrokerAdapter(
     },
 
     async disconnect() {
-      eventSource?.close()
-      eventSource = null
+      closeEventSource()
     },
 
     async getConnectionStatus() {
@@ -495,14 +763,7 @@ export function createIbkrHttpBrokerAdapter(
       return captureHealth(await request<BackendHealth>(baseUrl, '/health'))
     },
 
-    async getState() {
-      lastState = toTradingState(
-        await request<BackendState>(baseUrl, '/state'),
-        providerName,
-        executionEnvironment,
-      )
-      return lastState
-    },
+    getState: readState,
 
     subscribe(callback) {
       subscribers.add(callback)
@@ -510,14 +771,13 @@ export function createIbkrHttpBrokerAdapter(
       return () => {
         subscribers.delete(callback)
         if (subscribers.size === 0) {
-          eventSource?.close()
-          eventSource = null
+          closeEventSource()
         }
       }
     },
 
     async listAccounts() {
-      return (await this.getState()).accounts
+      return (await readState()).accounts
     },
 
     async setActiveAccount(accountId: string) {
@@ -527,7 +787,7 @@ export function createIbkrHttpBrokerAdapter(
           body: environmentBoundBody({}),
         }),
       )
-      lastState = await this.getState()
+      lastState = await readState()
       emit(
         withoutUndefined<TradingEvent>({
           type: 'accounts',
@@ -575,7 +835,11 @@ export function createIbkrHttpBrokerAdapter(
       const subscriber = { request, callback }
       equitySubscribers.add(subscriber)
       if (lastState) publishEquity()
-      else void this.getState().then(() => publishEquity())
+      else
+        void readState().then(publishEquity, (error) => {
+          refreshFailed(error)
+          if (equitySubscribers.has(subscriber)) callback(undefined)
+        })
       return () => equitySubscribers.delete(subscriber)
     },
 
@@ -586,19 +850,31 @@ export function createIbkrHttpBrokerAdapter(
       const subscriber = { request, callback }
       marginSubscribers.add(subscriber)
       if (lastState) publishMarginAvailable()
-      else void this.getState().then(() => publishMarginAvailable())
+      else
+        void readState().then(publishMarginAvailable, (error) => {
+          refreshFailed(error)
+          if (marginSubscribers.has(subscriber)) callback(undefined)
+        })
       return () => marginSubscribers.delete(subscriber)
     },
 
     subscribePipValue(
-      request: TradingPipValueRequest,
+      _request: TradingPipValueRequest,
       callback: (pipValue: number | undefined) => void,
     ) {
-      callback(request.symbol.type === 'forex' ? 0.0001 : undefined)
+      // IBKR session metadata currently supplies price increments, not a monetary pip value.
+      callback(undefined)
       return () => undefined
     },
 
     async isTradable(context: TradingOrderContext) {
+      if (context.symbol.type === undefined) {
+        return {
+          tradable: false,
+          reason:
+            'The instrument type is unavailable or unsupported. Resolve a supported contract before trading.',
+        }
+      }
       if (isAlpaca && context.symbol.type !== 'stock') {
         return {
           tradable: false,
@@ -698,7 +974,7 @@ export function createIbkrHttpBrokerAdapter(
     },
 
     async getOrdersHistory(_request?: TradingOrdersHistoryRequest): Promise<TradingOrder[]> {
-      return (await this.getState()).ordersHistory ?? []
+      return (await readState()).ordersHistory ?? []
     },
 
     getAccountManagerInfo() {
@@ -706,10 +982,7 @@ export function createIbkrHttpBrokerAdapter(
       return withIbkrAccountManagerPages(defaults)
     },
 
-    async getAccountManagerTableRows(request: TradingAccountManagerTableDataRequest) {
-      const state = await this.getState()
-      return ibkrAccountManagerRows(state, request)
-    },
+    getAccountManagerTableRows: accountManagerRows,
 
     subscribeAccountManagerTableRows(
       request: TradingAccountManagerTableDataRequest,
@@ -719,9 +992,9 @@ export function createIbkrHttpBrokerAdapter(
       const listener = (event: TradingEvent) => {
         if (event.type !== 'state' && event.type !== 'accounts' && event.type !== 'positions')
           return
-        void this.getAccountManagerTableRows?.(request).then((rows) => {
+        void accountManagerRows(request).then((rows) => {
           if (!disposed) callback(rows)
-        })
+        }, refreshFailed)
       }
       subscribers.add(listener)
       return () => {
@@ -808,29 +1081,11 @@ export function createIbkrHttpBrokerAdapter(
     },
 
     async cancelOrder(orderId: string, _context, financialOptions) {
-      await userFacingRequest(() =>
-        request(baseUrl, `/orders/${encodeURIComponent(orderId)}`, {
-          method: 'DELETE',
-          body: environmentBoundBody({
-            ...(financialOptions ? { metadata: financialOptions } : {}),
-          }),
-        }),
-      )
+      await cancelOrder(orderId, financialOptions)
     },
 
     async cancelOrders(orderIds: string[], _context, financialOptions) {
-      await Promise.all(
-        orderIds.map((orderId) =>
-          userFacingRequest(() =>
-            request(baseUrl, `/orders/${encodeURIComponent(orderId)}`, {
-              method: 'DELETE',
-              body: environmentBoundBody({
-                ...(financialOptions ? { metadata: financialOptions } : {}),
-              }),
-            }),
-          ),
-        ),
-      )
+      await Promise.all(orderIds.map((orderId) => cancelOrder(orderId, financialOptions)))
     },
 
     async previewClosePosition(
@@ -848,10 +1103,46 @@ export function createIbkrHttpBrokerAdapter(
         ),
       )
       const preview = toOrderPreviewResult(result)
+      const rows: TradingPreviewSection['rows'] = []
+      const moneyValue = (amount: number, currency?: string) =>
+        currency
+          ? new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount)
+          : `${amount} (currency unavailable)`
+      if (preview.estimatedCommission !== undefined) {
+        rows.push({
+          label: 'Estimated commission',
+          value: moneyValue(preview.estimatedCommission, preview.commissionCurrency),
+        })
+      } else if (preview.estimatedCommissionRange) {
+        const { minimum, maximum } = preview.estimatedCommissionRange
+        const value =
+          minimum !== undefined && maximum !== undefined
+            ? `${moneyValue(minimum, preview.commissionCurrency)} – ${moneyValue(maximum, preview.commissionCurrency)}`
+            : minimum !== undefined
+              ? `From ${moneyValue(minimum, preview.commissionCurrency)}`
+              : maximum !== undefined
+                ? `Up to ${moneyValue(maximum, preview.commissionCurrency)}`
+                : undefined
+        if (value) rows.push({ label: 'Estimated commission', value })
+      }
+      if (preview.estimatedFees !== undefined)
+        rows.push({
+          label: 'Estimated fees',
+          value: moneyValue(preview.estimatedFees, preview.feesCurrency),
+        })
+      if (preview.estimatedMargin !== undefined)
+        rows.push({
+          label: 'Estimated margin',
+          value: moneyValue(preview.estimatedMargin, preview.marginCurrency),
+        })
+      const messages = [preview.message, ...(preview.warnings ?? [])].filter(
+        (value): value is string => typeof value === 'string' && value.length > 0,
+      )
+      const sections = [...(preview.sections ?? []), ...(rows.length ? [{ rows }] : [])]
       return withoutUndefined<TradingPositionPreviewResult>({
         accepted: preview.accepted,
-        message: preview.message,
-        sections: preview.sections,
+        message: messages.length ? messages.join('\n') : undefined,
+        sections: sections.length ? sections : undefined,
       })
     },
 
@@ -884,13 +1175,21 @@ export function createIbkrHttpBrokerAdapter(
   return adapter
 }
 
-function priceIncrementAt(
+function authoritativePriceIncrements(
   bands: Array<{ lowEdge: number; increment: number }> | undefined,
-  price: number | undefined,
-): number | undefined {
+): Array<{ lowEdge: number; increment: number }> | undefined {
   if (!bands?.length) return undefined
-  const finitePrice = price !== undefined && Number.isFinite(price) ? price : 0
-  return bands
-    .filter((band) => band.lowEdge <= finitePrice && band.increment > 0)
-    .sort((left, right) => right.lowEdge - left.lowEdge)[0]?.increment
+  let previous = -Infinity
+  for (const band of bands) {
+    if (
+      !Number.isFinite(band.lowEdge) ||
+      band.lowEdge < 0 ||
+      band.lowEdge <= previous ||
+      !Number.isFinite(band.increment) ||
+      band.increment <= 0
+    )
+      return undefined
+    previous = band.lowEdge
+  }
+  return bands.map((band) => ({ ...band }))
 }

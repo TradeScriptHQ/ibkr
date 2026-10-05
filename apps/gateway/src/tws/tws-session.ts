@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import {
+  type BrokerConnectionDiagnostics,
+  type ConnectionType,
+  connectionTypeLabel,
+  inferConnectionType,
+} from '@ibkr-terminal/contracts'
+import {
   type Contract,
   type ErrorCode,
   EventName,
@@ -8,6 +14,7 @@ import {
   type OrderState,
 } from '@stoqey/ib'
 import type { GatewayConfig } from '../config.js'
+import { accountsMatchExecutionEnvironment } from '../connections/account-environment.js'
 import { OrderIdAllocator } from './order-id-allocator.js'
 
 export type TwsConnectionState =
@@ -33,6 +40,7 @@ export interface TwsSessionSnapshot {
   readonly positionCount: number
   readonly executionCount: number
   readonly lastErrorCode?: number
+  readonly connection: BrokerConnectionDiagnostics
 }
 
 interface ReconciliationProgress {
@@ -45,21 +53,26 @@ interface ReconciliationProgress {
 
 type Subscriber = (snapshot: TwsSessionSnapshot) => void
 
+const API_STARTUP_TIMEOUT_MS = 5_000
 const RECONCILIATION_TIMEOUT_MS = 30_000
-const MAX_RECONNECT_DELAY_MS = 30_000
+const MAX_AUTOMATIC_RETRIES = 5
 
 export class TwsSession {
   readonly #config: GatewayConfig['ibkr']
+  readonly #connectionLabel: string
+  readonly #connectionType: ConnectionType
   readonly #api: IBApi
   readonly #subscribers = new Set<Subscriber>()
-  readonly #accountSummaryRequestId = 900_001
-  readonly #executionRequestId = 900_002
+  #accountSummaryRequestId: number | undefined
+  #executionRequestId: number | undefined
   #desiredConnection = false
   #generation = randomUUID()
   #initializedGeneration: string | undefined
   #state: TwsConnectionState = 'disconnected'
-  #message = 'TWS is not connected.'
+  #message: string
   #socketConnected = false
+  #connectivityLost = false
+  #reconnectMessage: string | undefined
   #nextOrderIdReady = false
   #managedAccountIds: readonly string[] = []
   #progress: ReconciliationProgress = this.#emptyProgress()
@@ -70,7 +83,11 @@ export class TwsSession {
   #executions = new Set<string>()
   #lastErrorCode: number | undefined
   #reconnectAttempt = 0
+  #reconnectExhausted = false
+  #nextReconnectAt: string | null = null
+  #connectionIssue: BrokerConnectionDiagnostics['issue']
   #reconnectTimer: NodeJS.Timeout | undefined
+  #apiStartupTimer: NodeJS.Timeout | undefined
   #reconciliationTimer: NodeJS.Timeout | undefined
 
   constructor(
@@ -79,6 +96,9 @@ export class TwsSession {
     private readonly orderIds = new OrderIdAllocator(),
   ) {
     this.#config = config
+    this.#connectionType = config.connectionType ?? inferConnectionType(config.port)
+    this.#connectionLabel = connectionTypeLabel(this.#connectionType)
+    this.#message = `${this.#connectionLabel} is not connected.`
     this.#api = api ?? new IBApi({ host: config.host, port: config.port, maxReqPerSec: 40 })
     this.#registerListeners()
   }
@@ -100,6 +120,27 @@ export class TwsSession {
       completedOrderCount: this.#completedOrders.size,
       positionCount: this.#positions.size,
       executionCount: this.#executions.size,
+      connection: {
+        connectionType: this.#connectionType,
+        clientId: this.#config.clientId,
+        ...(this.#connectionIssue === undefined ? {} : { issue: this.#connectionIssue }),
+        ...(this.#reconnectExhausted ||
+        (this.#desiredConnection &&
+          this.#state !== 'ready' &&
+          (this.#reconnectTimer !== undefined ||
+            (this.#reconnectAttempt > 0 &&
+              (this.#state === 'connecting' || this.#state === 'reconciling')) ||
+            this.#connectionIssue === 'client-id-in-use'))
+          ? {
+              retry: {
+                attempt: this.#reconnectAttempt,
+                maxAttempts: MAX_AUTOMATIC_RETRIES,
+                exhausted: this.#reconnectExhausted,
+                nextAttemptAt: this.#nextReconnectAt,
+              },
+            }
+          : {}),
+      },
       ...(this.#lastErrorCode === undefined ? {} : { lastErrorCode: this.#lastErrorCode }),
     }
   }
@@ -111,42 +152,89 @@ export class TwsSession {
   }
 
   connect(): void {
+    if (!this.#desiredConnection) {
+      this.#reconnectAttempt = 0
+      this.#reconnectExhausted = false
+      this.#connectionIssue = undefined
+    }
     this.#desiredConnection = true
     if (this.#socketConnected || this.#state === 'connecting') return
     this.#clearReconnectTimer()
+    this.#reconnectMessage = undefined
     this.#transition(
       'connecting',
-      `Connecting to the local TWS ${this.#config.executionEnvironment} session.`,
+      `Connecting to the local ${this.#connectionLabel} ${this.#config.executionEnvironment} session.`,
     )
     this.#api.connect(this.#config.clientId)
   }
 
+  retryConnection(): void {
+    if (this.#socketConnected || this.#state === 'connecting') return
+    this.#desiredConnection = false
+    this.connect()
+  }
+
   disconnect(): void {
     this.#desiredConnection = false
+    this.#reconnectExhausted = false
+    this.#connectionIssue = undefined
+    this.#reconnectMessage = undefined
     this.#clearReconnectTimer()
     this.#clearReconciliationTimer()
     this.#invalidateBrokerReadiness()
-    if (this.#api.isConnected) this.#api.disconnect()
-    this.#transition('disconnected', 'TWS was disconnected by the local operator.')
+    this.#api.disconnect()
+    this.#transition(
+      'disconnected',
+      `${this.#connectionLabel} was disconnected by the local operator.`,
+    )
   }
 
   allocateOrderId(): number {
     if (this.#state !== 'ready' || !this.#nextOrderIdReady) {
-      throw new Error('TWS order allocation is unavailable until reconciliation is complete')
+      throw new Error(
+        `${this.#connectionLabel} order allocation is unavailable until reconciliation is complete`,
+      )
     }
     const allocated = this.orderIds.allocate()
-    if (allocated === undefined) throw new Error('TWS has not supplied a valid order ID')
+    if (allocated === undefined)
+      throw new Error(`${this.#connectionLabel} has not supplied a valid order ID`)
     return allocated
   }
 
   #registerListeners(): void {
     this.#api
       .on(EventName.connected, () => {
+        if (!this.#desiredConnection) {
+          this.#api.disconnect()
+          return
+        }
         this.#socketConnected = true
-        this.#reconnectAttempt = 0
-        this.#transition('connecting', 'TWS socket connected; waiting for protocol readiness.')
+        this.#connectivityLost = false
+        this.#transition(
+          'connecting',
+          `${this.#connectionLabel} socket connected; waiting for protocol readiness.`,
+        )
+        this.#clearApiStartupTimer()
+        this.#apiStartupTimer = setTimeout(() => {
+          this.#apiStartupTimer = undefined
+          if (
+            this.#desiredConnection &&
+            this.#socketConnected &&
+            !this.#nextOrderIdReady &&
+            this.#state === 'connecting'
+          ) {
+            this.#connectionIssue = undefined
+            this.#transition(
+              'error',
+              `${this.#connectionLabel} connected, but its API did not complete startup within 5 seconds. ${this.#connectionLabel} may still show a healthy connection. Check ${this.#connectionLabel}, restart it if needed, then retry the workstation.`,
+            )
+          }
+        }, API_STARTUP_TIMEOUT_MS)
       })
       .on(EventName.disconnected, () => this.#handleDisconnected())
+      .on(EventName.info, (message: string, code: number) => {
+        this.#handleError(new Error(message), Number(code), -1)
+      })
       .on(
         EventName.error,
         (error: Error, code: ErrorCode, requestId: number, _advancedOrderReject?: unknown) => {
@@ -154,6 +242,7 @@ export class TwsSession {
         },
       )
       .on(EventName.managedAccounts, (accountsCsv: string) => {
+        if (!this.#desiredConnection) return
         this.#managedAccountIds = [
           ...new Set(
             accountsCsv
@@ -166,6 +255,7 @@ export class TwsSession {
         this.#maybeReady()
       })
       .on(EventName.nextValidId, (orderId: number) => {
+        if (!this.#desiredConnection || this.#connectivityLost) return
         this.#receiveNextValidOrderId(orderId)
         if (this.#initializedGeneration !== this.#generation) {
           this.#initializedGeneration = this.#generation
@@ -229,12 +319,20 @@ export class TwsSession {
   }
 
   #beginReconciliation(): void {
+    this.#clearApiStartupTimer()
+    if (this.#accountSummaryRequestId !== undefined)
+      this.#api.cancelAccountSummary(this.#accountSummaryRequestId)
+    this.#accountSummaryRequestId = this.orderIds.allocateRequestId()
+    this.#executionRequestId = this.orderIds.allocateRequestId()
     this.#progress = this.#emptyProgress()
     this.#openOrders.clear()
     this.#completedOrders.clear()
     this.#positions.clear()
     this.#executions.clear()
-    this.#transition('reconciling', 'TWS protocol is ready; reconciling broker state.')
+    this.#transition(
+      'reconciling',
+      `${this.#connectionLabel} protocol is ready; reconciling broker state.`,
+    )
 
     this.#api.reqManagedAccts()
     this.#api.reqAccountSummary(
@@ -269,7 +367,10 @@ export class TwsSession {
     this.#clearReconciliationTimer()
     this.#reconciliationTimer = setTimeout(() => {
       if (!this.#isReconciliationComplete()) {
-        this.#transition('error', 'TWS reconciliation timed out; trading remains disabled.')
+        this.#transition(
+          'error',
+          `${this.#connectionLabel} reconciliation timed out; trading remains disabled.`,
+        )
       }
     }, RECONCILIATION_TIMEOUT_MS)
   }
@@ -292,17 +393,27 @@ export class TwsSession {
     this.#generation = randomUUID()
     this.#initializedGeneration = undefined
     this.#invalidateBrokerReadiness()
-    this.#transition('disconnected', 'The TWS socket is disconnected; broker state is stale.')
+    this.#transition(
+      this.#reconnectExhausted ? 'error' : 'disconnected',
+      this.#reconnectMessage ??
+        `${this.#connectionLabel} is disconnected; check its sign-in and IBKR connection.`,
+    )
     if (this.#desiredConnection) this.#scheduleReconnect()
   }
 
   #handleError(error: Error, code: number, requestId: number): void {
+    if (!this.#desiredConnection) return
     this.#lastErrorCode = code
     if (code === 1100) {
+      this.#connectionIssue = 'ibkr-connectivity-lost'
+      this.#connectivityLost = true
+      this.#invalidateBrokerReadiness()
       this.#transition('degraded', 'IBKR connectivity was lost; trading is frozen.')
       return
     }
     if (code === 1101 || code === 1102) {
+      this.#connectionIssue = undefined
+      this.#connectivityLost = false
       this.#initializedGeneration = undefined
       this.#invalidateBrokerReadiness()
       this.#transition('reconciling', 'IBKR connectivity returned; broker state is reconciling.')
@@ -310,12 +421,21 @@ export class TwsSession {
       return
     }
     if (code === 326) {
-      this.#desiredConnection = false
-      this.#transition('error', 'TWS API client ID 0 is already in use.')
+      this.#connectionIssue = 'client-id-in-use'
+      this.#invalidateBrokerReadiness()
+      this.#reconnectMessage = `${this.#connectionLabel} client ID ${this.#config.clientId} is already in use; check its sign-in and IBKR connection.`
+      this.#transition('degraded', this.#reconnectMessage)
+      // Keep the operator's connection intent. Retry only once this rejected socket closes.
+      this.#api.disconnect()
       return
     }
     if (code === 502 || code === 504) {
-      this.#transition('error', 'Unable to connect to TWS on the configured port.')
+      this.#connectionIssue = undefined
+      this.#clearApiStartupTimer()
+      this.#transition(
+        'error',
+        `Unable to connect to ${this.#connectionLabel} on the configured port.`,
+      )
       return
     }
     if (requestId >= 0) {
@@ -323,7 +443,7 @@ export class TwsSession {
       // replace the session readiness message or make a healthy connection look stale.
       return
     }
-    this.#message = `TWS reported code ${code}: ${error.message}`
+    this.#message = `${this.#connectionLabel} reported code ${code}: ${error.message}`
     this.#notify()
   }
 
@@ -335,19 +455,36 @@ export class TwsSession {
 
   #receiveNextValidOrderId(orderId: number): void {
     if (!Number.isInteger(orderId) || orderId < 0) return
+    if (this.#connectionIssue === 'client-id-in-use') this.#connectionIssue = undefined
     this.orderIds.observeNextValid(orderId)
     this.#nextOrderIdReady = true
     this.#notify()
   }
 
   #maybeReady(): void {
+    if (!this.#desiredConnection || !this.#socketConnected || this.#connectivityLost) return
     if (!this.#isReconciliationComplete()) return
     this.#clearReconciliationTimer()
     if (this.#managedAccountIds.length === 0) {
-      this.#transition('error', 'TWS returned no managed accounts; trading remains disabled.')
+      this.#transition(
+        'error',
+        `${this.#connectionLabel} returned no managed accounts; trading remains disabled.`,
+      )
       return
     }
-    this.#transition('ready', 'TWS account state is reconciled.')
+    if (
+      !accountsMatchExecutionEnvironment(this.#managedAccountIds, this.#config.executionEnvironment)
+    ) {
+      this.#transition(
+        'error',
+        `The ${this.#connectionLabel} account does not match the selected Live or Paper mode; trading remains disabled.`,
+      )
+      return
+    }
+    this.#reconnectAttempt = 0
+    this.#reconnectExhausted = false
+    this.#connectionIssue = undefined
+    this.#transition('ready', `${this.#connectionLabel} account state is reconciled.`)
   }
 
   #isReconciliationComplete(): boolean {
@@ -362,6 +499,7 @@ export class TwsSession {
   }
 
   #invalidateBrokerReadiness(): void {
+    this.#clearApiStartupTimer()
     this.#nextOrderIdReady = false
     this.#progress = this.#emptyProgress()
     this.#openOrderPhase = 'complete'
@@ -380,19 +518,35 @@ export class TwsSession {
 
   #scheduleReconnect(): void {
     if (this.#reconnectTimer !== undefined) return
-    const baseDelay = Math.min(1_000 * 2 ** this.#reconnectAttempt, MAX_RECONNECT_DELAY_MS)
+    if (this.#reconnectAttempt >= MAX_AUTOMATIC_RETRIES) {
+      this.#desiredConnection = false
+      this.#reconnectExhausted = true
+      this.#transition('error', this.#message)
+      return
+    }
+    const baseDelay = 1_000 * 2 ** this.#reconnectAttempt
     const delay = Math.round(baseDelay * (0.75 + Math.random() * 0.5))
     this.#reconnectAttempt += 1
+    this.#nextReconnectAt = new Date(Date.now() + delay).toISOString()
     this.#reconnectTimer = setTimeout(() => {
       this.#reconnectTimer = undefined
+      this.#nextReconnectAt = null
       if (this.#desiredConnection) this.connect()
     }, delay)
+    this.#notify()
   }
 
   #clearReconnectTimer(): void {
+    this.#nextReconnectAt = null
     if (this.#reconnectTimer === undefined) return
     clearTimeout(this.#reconnectTimer)
     this.#reconnectTimer = undefined
+  }
+
+  #clearApiStartupTimer(): void {
+    if (this.#apiStartupTimer === undefined) return
+    clearTimeout(this.#apiStartupTimer)
+    this.#apiStartupTimer = undefined
   }
 
   #clearReconciliationTimer(): void {

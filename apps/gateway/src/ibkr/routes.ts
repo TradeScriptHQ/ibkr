@@ -1,4 +1,4 @@
-import type { BrokerContractDetails } from '@ibkr-terminal/contracts'
+import { type BrokerContractDetails, inferConnectionType } from '@ibkr-terminal/contracts'
 import type { FastifyInstance, FastifyRequest, RouteShorthandOptions } from 'fastify'
 import type { GatewayConfig } from '../config.js'
 import { fromIbSymbol } from './contracts.js'
@@ -45,6 +45,7 @@ interface IbkrRouteOptions {
   brokerStore: BrokerStateStore
   authenticated: RouteShorthandOptions
   financialMutation: RouteShorthandOptions
+  brokerInspection: RouteShorthandOptions
   brokerMutation<T>(
     request: FastifyRequest,
     eventType: string,
@@ -54,13 +55,15 @@ interface IbkrRouteOptions {
 
 /** Broker HTTP endpoints; authentication and journaling are supplied by the server. */
 export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptions): void {
-  const { authenticated, financialMutation, brokerMutation } = options
+  const { authenticated, financialMutation, brokerInspection, brokerMutation } = options
   app.get('/api/v1/ibkr/health', authenticated, async () => {
     const { brokerStore } = options
     const state = brokerStore.getState()
     return {
       ok: state.connectionStatus === 'connected',
       mode: options.config.ibkr.executionEnvironment,
+      connectionType:
+        options.config.ibkr.connectionType ?? inferConnectionType(options.config.ibkr.port),
       ibkrHost: options.config.ibkr.host,
       ibkrPort: options.config.ibkr.port,
       backendPort: options.config.gateway.port,
@@ -76,6 +79,28 @@ export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptio
     const { brokerStore } = options
     return brokerStore.getState()
   })
+  app.get('/api/v1/ibkr/paper-ownership/:ownerId', authenticated, async (request) => {
+    const { ownerId } = request.params as { ownerId: string }
+    return options.ibkr.paperOwnershipRecovery(ownerId)
+  })
+  app.post('/api/v1/ibkr/paper-ownership/:ownerId/reconcile', brokerInspection, async (request) => {
+    const { ownerId } = request.params as { ownerId: string }
+    const body = request.body as ExecutionEnvironmentBoundRequest
+    return brokerMutation(request, 'paper-ownership.reconcile', () =>
+      executeEnvironmentBoundMutation(body, options.config.ibkr.executionEnvironment, () =>
+        options.ibkr.reconcilePaperOwnership(ownerId),
+      ),
+    )
+  })
+  app.get(
+    '/api/v1/ibkr/accounts/:accountId/currency-conversion',
+    authenticated,
+    async (request) => {
+      const { accountId } = request.params as { accountId: string }
+      const { fromCurrency } = request.query as { fromCurrency?: string }
+      return options.ibkr.getAccountCurrencyConversion(accountId, fromCurrency ?? '')
+    },
+  )
   app.get('/api/v1/ibkr/time', authenticated, async () => ({
     time: Date.now(),
     iso: new Date().toISOString(),
@@ -231,7 +256,7 @@ export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptio
     const query = request.query as Record<string, string | string[] | undefined>
     const rawSymbols = Array.isArray(query.symbol) ? query.symbol : [query.symbol ?? '']
     const symbols = rawSymbols.flatMap((value) => value.split(',')).filter(Boolean)
-    return ibkr.getQuotes(
+    return ibkr.getQualifiedQuotes(
       symbols.map(
         (symbol): BrokerSymbol => ({
           symbol,
@@ -320,7 +345,7 @@ export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptio
     })
   })
 
-  app.post('/api/v1/ibkr/options/resolve', financialMutation, async (request) => {
+  app.post('/api/v1/ibkr/options/resolve', brokerInspection, async (request) => {
     const { ibkr } = options
     const body = request.body as OptionResolveRequest
     return brokerMutation(request, 'option.resolve', () =>
@@ -360,7 +385,7 @@ export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptio
     })
   })
 
-  app.post('/api/v1/ibkr/orders/preview', financialMutation, async (request) => {
+  app.post('/api/v1/ibkr/orders/preview', brokerInspection, async (request) => {
     const { ibkr } = options
     const body = request.body as OrderRequest
     return brokerMutation(request, 'order.preview', () =>
@@ -381,7 +406,7 @@ export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptio
     return reply.status(201).send(result)
   })
 
-  app.post('/api/v1/ibkr/accounts/:accountId/activate', financialMutation, async (request) => {
+  app.post('/api/v1/ibkr/accounts/:accountId/activate', brokerInspection, async (request) => {
     const { ibkr } = options
     const body = request.body as ExecutionEnvironmentBoundRequest
     const { accountId } = request.params as { accountId: string }
@@ -392,7 +417,7 @@ export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptio
     )
   })
 
-  app.post('/api/v1/ibkr/orders/:orderId/preview', financialMutation, async (request) => {
+  app.post('/api/v1/ibkr/orders/:orderId/preview', brokerInspection, async (request) => {
     const { ibkr } = options
     const body = request.body as ModifyOrderRequest
     const { orderId } = request.params as { orderId: string }
@@ -428,7 +453,7 @@ export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptio
 
   app.post(
     '/api/v1/ibkr/positions/:positionId/close/preview',
-    financialMutation,
+    brokerInspection,
     async (request) => {
       const body = request.body as ClosePositionRequest
       const { positionId } = request.params as { positionId: string }
@@ -487,6 +512,8 @@ function optionChainRequest(queryValue: unknown): OptionChainRequest {
           : '',
     ...(typeof query.exchange === 'string' ? { exchange: query.exchange } : {}),
     ...(typeof query.currency === 'string' ? { currency: query.currency } : {}),
+    ...(typeof query.tradingClass === 'string' ? { tradingClass: query.tradingClass } : {}),
+    ...(query.includeTradingClasses === 'true' ? { includeTradingClasses: true } : {}),
     ...(typeof query.underlyingAssetClass === 'string'
       ? { underlyingAssetClass: query.underlyingAssetClass }
       : {}),

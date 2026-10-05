@@ -1,6 +1,7 @@
 import type { BrokerSymbol, MarketQuote, MarketSessionInfo } from '@ibkr-terminal/contracts'
 import type { TradingOrderDraft } from '@tradescript/pro/sdk'
 import { expect, test } from './support/fixtures.js'
+import { FORECAST_SEARCH_ROOT, selectForecastPair } from './support/forecast-contracts.js'
 import { descriptor, discover, queryFor, select } from './support/instrument-contracts.js'
 import {
   accepted,
@@ -12,11 +13,6 @@ import {
 } from './support/paper-orders.js'
 import { browserHeaders, expectJsonOk, openTerminalSession } from './support/session.js'
 
-function forecastSearch(): string {
-  const now = new Date()
-  return `FF ${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}`
-}
-
 test.beforeEach(async ({ request }) => {
   await openTerminalSession(request)
 })
@@ -25,20 +21,24 @@ test('ForecastEx: native outcome identity and its exact opposing contract', asyn
   page,
   request,
 }) => {
-  const selected = (await discover(request, forecastSearch(), 'event-contract', 'FORECASTX'))[0]!
+  const { selected, opposite: discoveredOpposite } = selectForecastPair(
+    await discover(request, FORECAST_SEARCH_ROOT, 'event-contract', 'FORECASTX'),
+  )
   expect(selected.contractIdentity).toMatchObject({ securityType: 'OPT', multiplier: 1 })
   const opposite = await expectJsonOk<BrokerSymbol>(
     await request.get(`/api/v1/ibkr/contracts/opposing-outcome?${queryFor(descriptor(selected))}`, {
       headers: browserHeaders,
     }),
   )
+  expect(opposite.canonicalSymbol).toBe(discoveredOpposite.canonicalSymbol)
+  expect(opposite.contractIdentity).toMatchObject(discoveredOpposite.contractIdentity)
   expect(opposite.contractIdentity?.conId).not.toBe(selected.contractIdentity?.conId)
   expect(opposite.contractIdentity?.expiry).toBe(selected.contractIdentity?.expiry)
   expect(opposite.contractIdentity?.strike).toBe(selected.contractIdentity?.strike)
   expect(opposite.contractIdentity?.right).toBe(
     selected.contractIdentity?.right === 'C' ? 'P' : 'C',
   )
-  await select(page, forecastSearch(), 'Forecast contracts', selected)
+  await select(page, selected.canonicalSymbol, 'Forecast contracts', selected)
   const ticket = page.getByRole('region', { name: 'Order Entry' })
   await expect(ticket.getByText('Prediction Market', { exact: true })).toBeVisible()
   await expect(ticket.getByText('LMT', { exact: true })).toBeVisible()
@@ -68,7 +68,9 @@ for (const flow of ['lifecycle', 'execution'] as const) {
     request,
   }) => {
     test.setTimeout(180_000)
-    const selected = (await discover(request, forecastSearch(), 'event-contract', 'FORECASTX'))[0]!
+    const { selected } = selectForecastPair(
+      await discover(request, FORECAST_SEARCH_ROOT, 'event-contract', 'FORECASTX'),
+    )
     const symbol = descriptor(selected)
     const session = await expectJsonOk<MarketSessionInfo>(
       await request.get(`/api/v1/ibkr/sessions?${queryFor(symbol)}`, { headers: browserHeaders }),
@@ -82,7 +84,7 @@ for (const flow of ['lifecycle', 'execution'] as const) {
       ),
       `TWS ForecastEx session is ${session.currentState}`,
     )
-    await select(page, forecastSearch(), 'Forecast contracts', selected)
+    await select(page, selected.canonicalSymbol, 'Forecast contracts', selected)
     let quote: MarketQuote | undefined
     await expect
       .poll(
@@ -198,7 +200,7 @@ for (const flow of ['lifecycle', 'execution'] as const) {
                 throw new Error(preview.message ?? 'Position close preview rejected')
               await trading.closePosition(position.id, context, { quantity: 1 })
             },
-            { conId: selected.contractIdentity!.conId },
+            { conId: selected.contractIdentity.conId },
           ),
         ])
         await verifyMarketFill(request, closeId)

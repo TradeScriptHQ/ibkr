@@ -1,10 +1,15 @@
 import type { SystemStatusResponse } from '@ibkr-terminal/contracts'
 import {
+  type AgenticAccessPolicy,
   createTradeScriptAdapter,
   type SdkSymbolInfo,
+  type TradeScriptAdapterApi,
+  type TradingControllerApi,
   type TradingTerminalApi,
 } from '@tradescript/pro/sdk'
 import type { PanelLayoutControllerApi } from '@tradescript/pro/sdk/trading'
+import type { AppearanceStore } from './appearance.js'
+import { APP_NAME } from './branding.js'
 import { followDepthLadderPrice } from './ibkr/depth-ladder-price.js'
 import { createDepthRowExtension } from './ibkr/depth-row-extension.js'
 import { depthStatusMessage, followDepthStatus } from './ibkr/depth-status.js'
@@ -16,23 +21,34 @@ import { followInstrument, readInstrument } from './instrument-preference.js'
 import { createMcpAgentConsoleController } from './mcp/agent-console.js'
 import { connectTradeScriptMcp } from './mcp/browser-bridge.js'
 import { createLocalSimulation, MOCK_ACCOUNT_ID } from './mock/local-simulation.js'
-import { createConnectionRiskAuthority } from './risk.js'
+import type { ConnectionRiskAuthority } from './risk.js'
+import { followSdkLease } from './sdk-lease-renewal.js'
 import { createTerminalTradeScriptSdk } from './terminal-session.js'
 import { createLocalWatchlistAdapter } from './watchlist.js'
 import { activateWorkstationWidget, arrangeDesktopWorkstation } from './workspace-layout.js'
+import {
+  type AgentRiskAvailability,
+  initializeWorkstationAgentRisk,
+} from './workstation-agent-risk.js'
 import { authorizeWorkstation } from './workstation-authorization.js'
 import { installWorkstationE2e, removeWorkstationE2e } from './workstation-e2e.js'
 import { WorkstationLifetime } from './workstation-lifetime.js'
+import { type WorkstationLoadingState, workstationLoading } from './workstation-startup.js'
+import { WORKSTATION_ACCOUNT_THEMES, WORKSTATION_THEMES } from './workstation-theme.js'
 import {
-  applyChartAppearance,
+  licensedWorkstationSessionMeta,
+  licensedWorkstationWidgets,
   WORKSTATION_MESSAGE_AUTO_DISMISS_MS,
-  WORKSTATION_WIDGETS,
 } from './workstation-widgets.js'
 
 export type LoadState =
-  | { readonly state: 'loading'; readonly message: string }
+  | WorkstationLoadingState
   | { readonly state: 'error'; readonly message: string }
-  | { readonly state: 'ready'; readonly status: SystemStatusResponse }
+  | {
+      readonly state: 'ready'
+      readonly status: SystemStatusResponse
+      readonly agentRisk: AgentRiskAvailability
+    }
 
 export interface ChartDataRow {
   readonly time: number
@@ -43,17 +59,39 @@ export interface ChartDataRow {
   readonly volume?: number
 }
 
+export interface ChartDataSnapshot {
+  readonly bars: ChartDataRow[]
+  readonly interval: string
+  readonly symbol?: SdkSymbolInfo
+  readonly formatPrice?: (price: number) => string
+}
+
 export interface WorkstationOptions {
+  readonly appearance: AppearanceStore
   readonly host: HTMLDivElement | null
-  readonly setChartBarsReader: (reader: () => ChartDataRow[]) => void
+  readonly sessionMetaHost: HTMLDivElement | null
+  readonly setChartBarsReader: (reader: () => ChartDataSnapshot) => void
   readonly setActiveInstrument: (symbol: SdkSymbolInfo) => void
   readonly setLoadState: (state: LoadState) => void
   readonly mockMode: boolean
 }
 
+export async function initializeWorkstationTrading(
+  trading: Pick<TradingControllerApi, 'connect' | 'getState'>,
+  signal: AbortSignal,
+  onReady: () => void,
+): Promise<void> {
+  await trading.connect()
+  if (signal.aborted) return
+  await trading.getState()
+  if (!signal.aborted) onReady()
+}
+
 /** Owns one startup attempt and its resources independently of React's component lifetime. */
 export function createWorkstation({
+  appearance,
   host,
+  sessionMetaHost,
   setChartBarsReader,
   setActiveInstrument,
   setLoadState,
@@ -61,12 +99,13 @@ export function createWorkstation({
 }: WorkstationOptions) {
   const lifetime = new WorkstationLifetime()
   let terminal: TradingTerminalApi | undefined
+  let terminalInitialization: Promise<void> | undefined
   let layoutController: PanelLayoutControllerApi | undefined
   let destroyLayoutSizing: (() => void) | undefined
   const controller = lifetime.controller
   lifetime.defer(() => {
     removeWorkstationE2e()
-    setChartBarsReader(() => [])
+    setChartBarsReader(() => ({ bars: [], interval: '5m' }))
     destroyLayoutSizing?.()
   })
 
@@ -79,13 +118,25 @@ export function createWorkstation({
       setLoadState,
     )
     if (lifetime.disposed) return
-    document.title = `TradeScript · IBKR ${status.environment === 'live' ? 'Live' : 'Paper'} Terminal`
-    setLoadState({ state: 'loading', message: 'Loading the TradeScript trading surfaces…' })
+    const executionEnvironment = mockMode ? 'paper' : status.environment
+    document.title = mockMode
+      ? `${APP_NAME} · Simulation`
+      : `${APP_NAME} · ${executionEnvironment === 'live' ? 'Live' : 'Paper'}`
+    setLoadState(workstationLoading('sdk'))
     const sdk = await createTerminalTradeScriptSdk(bootstrap.lease)
     lifetime.defer(() => sdk.close())
     if (lifetime.disposed) {
       return
     }
+    const widgets = licensedWorkstationWidgets(sdk.authorization?.snapshot().policy)
+    if (sdk.authorization)
+      lifetime.defer(
+        followSdkLease(sdk.authorization, bootstrap, controller.signal, (message) => {
+          if (lifetime.disposed) return
+          setLoadState({ state: 'error', message })
+          void lifetime.dispose()
+        }),
+      )
 
     const simulation = mockMode
       ? createLocalSimulation({
@@ -109,6 +160,15 @@ export function createWorkstation({
             supportsAccountPnl: true,
           }),
       })
+    const profile = connection?.settings.profiles[connection.settings.active]
+    const connectionAgentPolicy = profile
+      ? {
+          enabled: profile.agentTradingEnabled,
+          autonomyMode: bootstrap.paperTrading.autonomyMode,
+          allowedAccountIds: profile.allowedAccountIds,
+          limits: profile.limits,
+        }
+      : undefined
     const riskConfig = mockMode
       ? {
           enabled: true,
@@ -128,22 +188,102 @@ export function createWorkstation({
             maxUnprotectedPositionQuantity: 20_000,
           },
         }
-      : bootstrap.paperTrading
-    const risk = riskConfig.enabled
-      ? await createConnectionRiskAuthority(sdk, broker, datafeed, riskConfig, status.environment)
-      : undefined
-    if (risk) lifetime.defer(() => risk.destroy())
-    if (lifetime.disposed) return
-    const adapter = createTradeScriptAdapter({
-      marketData: { feed: datafeed },
-      trading: { broker },
-      ...(risk === undefined ? {} : { risk: risk.controller, riskRequests: risk.requests }),
-      ...(riskConfig.enabled ? { agenticAccess: true as const } : {}),
+      : connectionAgentPolicy
+    if (!riskConfig) throw new Error('The broker connection settings are unavailable.')
+    let risk: ConnectionRiskAuthority | undefined
+    let agentRisk: AgentRiskAvailability = { state: riskConfig.enabled ? 'checking' : 'disabled' }
+    const marketData = sdk.marketData.createController(datafeed)
+    lifetime.defer(() => marketData.destroy())
+    const symbolLink = sdk.symbols.createLinkController({ groupId: 'tradescript-default' })
+    lifetime.defer(() => symbolLink.destroy())
+    // Both compositions share data/instrument controllers and remain owned until the mount is destroyed.
+    // Lazy chart surfaces can still hold the initial composition during the adapter handoff.
+    const adapters = new Set<TradeScriptAdapterApi>()
+    lifetime.defer(() => {
+      for (const owned of adapters) owned.destroy()
+      adapters.clear()
+      risk?.destroy()
     })
-    lifetime.defer(() => adapter.destroy())
-    const agentConsole = createMcpAgentConsoleController(status.environment, riskConfig.enabled)
+    const agenticAccess: AgenticAccessPolicy = {
+      read: riskConfig.enabled,
+      write: riskConfig.enabled,
+      trade: false,
+    }
+    let adapter = createTradeScriptAdapter({
+      marketData: { feed: datafeed, controller: marketData },
+      symbolLink,
+      trading: { broker },
+      agenticAccess,
+    })
+    let pendingAgentAdapter: TradeScriptAdapterApi | undefined
+    adapters.add(adapter)
+    const agentConsole = createMcpAgentConsoleController(executionEnvironment, agentRisk)
     lifetime.defer(() => agentConsole.destroy())
-    const watchlist = createLocalWatchlistAdapter()
+    const publishAgentRisk = (next: AgentRiskAvailability) => {
+      if (lifetime.disposed) return
+      agentRisk = next
+      agentConsole.publishAgentRisk(next)
+      setLoadState({ state: 'ready', status, agentRisk })
+    }
+    let mcp: ReturnType<typeof connectTradeScriptMcp> | undefined
+    const initializeAgentTrading = async () => {
+      const initializedRisk = await initializeWorkstationAgentRisk(
+        sdk,
+        broker,
+        datafeed,
+        riskConfig,
+        executionEnvironment,
+      )
+      if (lifetime.disposed) {
+        if (initializedRisk.state === 'ready') initializedRisk.authority.destroy()
+        return
+      }
+      if (initializedRisk.state !== 'ready') {
+        publishAgentRisk(initializedRisk)
+        return
+      }
+      risk = initializedRisk.authority
+      const verifiedAccess: AgenticAccessPolicy = {
+        read: true,
+        write: true,
+        trade: { mode: executionEnvironment },
+      }
+      let verifiedAdapter: TradeScriptAdapterApi | undefined
+      try {
+        verifiedAdapter = createTradeScriptAdapter({
+          marketData: { feed: datafeed, controller: marketData },
+          symbolLink,
+          trading: { broker },
+          risk: risk.controller,
+          riskRequests: risk.requests,
+          agenticAccess: verifiedAccess,
+        })
+        adapters.add(verifiedAdapter)
+        const trading = verifiedAdapter.trading
+        if (!trading) throw new Error('The agent trading controller is unavailable.')
+        const verified = verifiedAdapter
+        await initializeWorkstationTrading(trading, controller.signal, () => {
+          pendingAgentAdapter = verified
+          mounted.update({ adapter: verified, agentic: verifiedAccess })
+        })
+      } catch (error: unknown) {
+        if (!lifetime.disposed && adapter !== verifiedAdapter) {
+          pendingAgentAdapter = undefined
+          if (verifiedAdapter) {
+            verifiedAdapter.destroy()
+            adapters.delete(verifiedAdapter)
+          }
+          risk.destroy()
+          risk = undefined
+        }
+        throw error
+      }
+    }
+    setLoadState(workstationLoading('watchlist'))
+    const watchlist = await createLocalWatchlistAdapter(datafeed, () =>
+      adapter.symbolLink.getSymbol(),
+    )
+    setLoadState(workstationLoading('instrument'))
     const symbol =
       readInstrument(localStorage) ??
       (datafeed.resolveSymbol
@@ -161,16 +301,35 @@ export function createWorkstation({
 
     let stopOptionTicketRejections: (() => void) | undefined
     const depthRows = createDepthRowExtension()
+    setLoadState(workstationLoading('workspace'))
+    const initialAppearance = appearance.getSnapshot()
+    const sessionMetaOptions = licensedWorkstationSessionMeta(sdk.authorization?.snapshot().policy)
+    const sessionMeta =
+      sessionMetaHost && sessionMetaOptions
+        ? sdk.sessionMeta.mount({
+            ...sessionMetaOptions,
+            mount: sessionMetaHost,
+            controller: marketData,
+            symbol,
+            theme: WORKSTATION_THEMES[initialAppearance],
+          })
+        : undefined
+    if (sessionMeta) lifetime.defer(() => sessionMeta.destroy())
     const mounted = sdk.tradingTerminal.mount({
-      ...WORKSTATION_WIDGETS,
+      ...widgets,
+      theme: WORKSTATION_THEMES[initialAppearance],
+      accountPanelOptions: {
+        ...widgets.accountPanelOptions,
+        theme: WORKSTATION_ACCOUNT_THEMES[initialAppearance],
+      },
       predictionMarketOutcomes: loadForecastOutcomes,
       mount: host,
       adapter,
       symbol,
 
-      terminalId: mockMode ? 'local-mock-workstation' : 'ibkr-paper-workstation',
+      terminalId: mockMode ? 'local-mock-workstation' : `ibkr-${status.environment}-workstation`,
 
-      agentic: true,
+      agentic: agenticAccess,
       watchlistAdapter: watchlist,
 
       agentConsoleOptions: { controller: agentConsole },
@@ -184,7 +343,7 @@ export function createWorkstation({
       },
 
       optionChainOptions: {
-        ...WORKSTATION_WIDGETS.optionChainOptions,
+        ...widgets.optionChainOptions,
         onContractSelect() {
           activateWorkstationWidget(layoutController, 'option-ticket')
         },
@@ -211,8 +370,11 @@ export function createWorkstation({
 
       onReady(widget) {
         if (lifetime.disposed) return
-        setChartBarsReader(() =>
-          widget
+        setChartBarsReader(() => ({
+          interval: widget.chart().getInterval(),
+          symbol: widget.chart().getSymbol(),
+          formatPrice: (price) => widget.chart().priceFormatter().format(price),
+          bars: widget
             .chart()
             .getLoadedBars()
             .map((bar) => ({
@@ -223,8 +385,7 @@ export function createWorkstation({
               close: bar.close,
               ...(bar.volume === undefined ? {} : { volume: bar.volume }),
             })),
-        )
-        applyChartAppearance(widget)
+        }))
       },
 
       onLayoutReady(layout) {
@@ -237,12 +398,14 @@ export function createWorkstation({
       },
       onTerminalReady(api) {
         if (lifetime.disposed) return
+        if (api.adapter !== adapter && api.adapter !== pendingAgentAdapter) return
+        if (terminalInitialization && api.adapter !== pendingAgentAdapter) return
         const trading = api.trading
         if (trading === undefined) {
           if (!lifetime.disposed) {
             setLoadState({
               state: 'error',
-              message: 'The TradeScript terminal did not provide its trading controller.',
+              message: `${APP_NAME} did not provide its trading controller.`,
             })
           }
           return
@@ -252,11 +415,27 @@ export function createWorkstation({
         )
         installWorkstationE2e(trading, symbol, risk)
         terminal = api
-        if (!lifetime.disposed) setLoadState({ state: 'ready', status })
-        void (async () => {
-          await trading.connect()
-          await trading.getState()
-        })().catch((error: unknown) => {
+        if (terminalInitialization) {
+          adapter = api.adapter
+          pendingAgentAdapter = undefined
+          mcp?.replaceAgentic(adapter.agentic)
+          publishAgentRisk({ state: 'ready' })
+          return
+        }
+        setLoadState(workstationLoading('account'))
+        terminalInitialization = initializeWorkstationTrading(trading, controller.signal, () => {
+          setLoadState({ state: 'ready', status, agentRisk })
+          if (riskConfig.enabled)
+            void initializeAgentTrading().catch((error: unknown) => {
+              publishAgentRisk({
+                state: 'unavailable',
+                message:
+                  error instanceof Error
+                    ? error.message
+                    : 'The broker risk checks could not be completed.',
+              })
+            })
+        }).catch((error: unknown) => {
           if (!lifetime.disposed) {
             setLoadState({
               state: 'error',
@@ -265,17 +444,35 @@ export function createWorkstation({
                   ? error.message
                   : 'The IBKR trading controller could not connect.',
             })
+            void lifetime.dispose()
           }
         })
       },
     })
     lifetime.defer(() => mounted.destroy())
+    lifetime.defer(
+      appearance.subscribe(() => {
+        if (lifetime.disposed) return
+        const mode = appearance.getSnapshot()
+        sessionMeta?.update({ theme: WORKSTATION_THEMES[mode] })
+        mounted.update({
+          theme: WORKSTATION_THEMES[mode],
+          accountPanelOptions: {
+            ...widgets.accountPanelOptions,
+            theme: WORKSTATION_ACCOUNT_THEMES[mode],
+          },
+        })
+      }),
+    )
     lifetime.defer(() => stopOptionTicketRejections?.())
     const stopInstrument = followInstrument(
       adapter.symbolLink,
       symbol,
       localStorage,
-      setActiveInstrument,
+      (nextSymbol) => {
+        setActiveInstrument(nextSymbol)
+        sessionMeta?.update({ symbol: nextSymbol })
+      },
     )
     lifetime.defer(stopInstrument)
     let ladderPrice: number | undefined
@@ -313,12 +510,11 @@ export function createWorkstation({
     lifetime.defer(async () => {
       await terminal?.trading?.disconnect()
     })
-    lifetime.defer(
-      connectTradeScriptMcp({
-        agentic: adapter.agentic,
-        onState: (state) => agentConsole.publishMcp(state),
-      }),
-    )
+    mcp = connectTradeScriptMcp({
+      agentic: adapter.agentic,
+      onState: (state) => agentConsole.publishMcp(state),
+    })
+    lifetime.defer(() => mcp?.dispose())
   }
 
   const started = start().catch((error: unknown) => {

@@ -4,6 +4,7 @@ import {
   brokerSymbolKey,
   listingMarketDataExchange,
   normalizeBrokerSymbol,
+  requireQuoteIdentity,
   toIbQuoteContract,
 } from './contracts.js'
 import { marketQuoteHasPrice } from './market-data.js'
@@ -30,6 +31,8 @@ const IB_TICK = {
   DELAYED_BID_SIZE: 69,
   DELAYED_ASK_SIZE: 70,
   DELAYED_LAST_SIZE: 71,
+  DELAYED_HIGH: 72,
+  DELAYED_LOW: 73,
   DELAYED_VOLUME: 74,
   DELAYED_CLOSE: 75,
   DELAYED_OPEN: 76,
@@ -52,6 +55,7 @@ export class QuoteSubscriptions {
     private readonly ib: IBApi,
     private readonly store: BrokerStateStore,
     private readonly allocateRequestId: () => number,
+    private readonly idleMs = 60_000,
   ) {}
   restore(): void {
     for (const symbol of this.desiredQuoteSymbols.values()) this.ensureQuoteSubscription(symbol)
@@ -59,6 +63,7 @@ export class QuoteSubscriptions {
   private readonly quoteSubscriptions = new Map<string, QuoteSubscription>()
 
   private readonly desiredQuoteSymbols = new Map<string, BrokerSymbol>()
+  private readonly desiredExpiry = new Map<string, ReturnType<typeof setTimeout>>()
 
   private readonly quoteRequestIds = new Map<number, string>()
 
@@ -67,7 +72,10 @@ export class QuoteSubscriptions {
       throw new RequestError(503, 'IBKR bridge is not connected')
     }
     return symbols
-      .map((symbol) => normalizeBrokerSymbol(symbol))
+      .map((symbol) => {
+        requireQuoteIdentity(symbol)
+        return normalizeBrokerSymbol(symbol)
+      })
       .filter((symbol): symbol is BrokerSymbol => Boolean(symbol.symbol))
       .map((symbol) => {
         const previous = this.findQuote(symbol)
@@ -78,6 +86,7 @@ export class QuoteSubscriptions {
           (!Number.isFinite(age) || age >= options.maxAgeMs)
         const active = this.quoteSubscriptions.get(brokerSymbolKey(symbol))
         this.ensureQuoteSubscription(symbol, 0, active?.marketDataExchange, refresh)
+        this.touchDesiredQuote(symbol)
         const existing = this.findQuote(symbol)
         if (existing) return existing
         const pending: MarketQuote = {
@@ -104,6 +113,20 @@ export class QuoteSubscriptions {
     // Validate before retaining the request: rejected metadata must never leave a retry timer.
     const normalized = normalizeBrokerSymbol(symbol)
     const contract = toIbQuoteContract(normalized, marketDataExchange)
+    if (symbol.primaryExchange) {
+      const unqualifiedKey = brokerSymbolKey({ ...symbol, primaryExchange: undefined })
+      const unqualified = this.quoteSubscriptions.get(unqualifiedKey)
+      if (unqualifiedKey !== key && unqualified) {
+        if (unqualified.retryTimer) clearTimeout(unqualified.retryTimer)
+        this.quoteSubscriptions.delete(unqualifiedKey)
+        this.quoteRequestIds.delete(unqualified.reqId)
+        this.desiredQuoteSymbols.delete(unqualifiedKey)
+        const expiry = this.desiredExpiry.get(unqualifiedKey)
+        if (expiry) clearTimeout(expiry)
+        this.desiredExpiry.delete(unqualifiedKey)
+        this.ib.cancelMktData(unqualified.reqId)
+      }
+    }
     this.desiredQuoteSymbols.set(key, symbol)
     const active = this.quoteSubscriptions.get(key)
     if (active) {
@@ -181,9 +204,38 @@ export class QuoteSubscriptions {
     subscription.retryTimer.unref?.()
   }
 
-  clearQuoteSubscriptions(reason: string): void {
+  private touchDesiredQuote(symbol: BrokerSymbol): void {
+    const key = brokerSymbolKey(symbol)
+    const previous = this.desiredExpiry.get(key)
+    if (previous) clearTimeout(previous)
+    const timer = setTimeout(() => {
+      this.desiredExpiry.delete(key)
+      this.desiredQuoteSymbols.delete(key)
+      const active = this.quoteSubscriptions.get(key)
+      if (active) {
+        if (active.retryTimer) clearTimeout(active.retryTimer)
+        this.quoteSubscriptions.delete(key)
+        this.quoteRequestIds.delete(active.reqId)
+        this.ib.cancelMktData(active.reqId)
+      }
+      const quote = this.findQuote(symbol)
+      if (quote)
+        this.store.upsertQuote({
+          symbol: quote.symbol,
+          timestamp: quote.timestamp,
+          status: 'unavailable',
+          unavailableReason:
+            'Quote subscription expired while no view was requesting this instrument.',
+        })
+    }, this.idleMs)
+    timer.unref?.()
+    this.desiredExpiry.set(key, timer)
+  }
+
+  clearQuoteSubscriptions(reason: string, cancelActive = false): void {
     for (const subscription of this.quoteSubscriptions.values()) {
       if (subscription.retryTimer) clearTimeout(subscription.retryTimer)
+      if (cancelActive) this.ib.cancelMktData(subscription.reqId)
       const quote = this.quoteForRequest(subscription.reqId)
       this.store.upsertQuote({
         symbol: subscription.symbol,
@@ -221,21 +273,9 @@ export class QuoteSubscriptions {
 
   findQuote(symbol: BrokerSymbol): MarketQuote | undefined {
     const key = brokerSymbolKey(symbol)
-    const quotes = this.store.getState().quotes
-    const exact = quotes.find((quote) => brokerSymbolKey(quote.symbol) === key)
-    if (exact && marketQuoteHasPrice(exact)) return exact
-
-    const normalized = normalizeBrokerSymbol(symbol)
-    const fallback = quotes.find((quote) => {
-      const candidate = normalizeBrokerSymbol(quote.symbol)
-      return (
-        candidate.symbol === normalized.symbol &&
-        (candidate.assetClass ?? 'stock') === (normalized.assetClass ?? 'stock') &&
-        (candidate.currency ?? '') === (normalized.currency ?? '') &&
-        marketQuoteHasPrice(quote)
-      )
-    })
-    return fallback ?? exact
+    // Venue/listing and expiry/strike/outcome identities cannot use a ticker-only
+    // fallback. Missing exact prices stay unavailable until their own ticks arrive.
+    return this.store.getState().quotes.find((quote) => brokerSymbolKey(quote.symbol) === key)
   }
 
   handleTickPrice(reqId: number, field: number, value: number): void {
@@ -290,11 +330,11 @@ export class QuoteSubscriptions {
       if (value <= 0) return
       patch.open = value
     }
-    if (field === IB_TICK.HIGH) {
+    if (field === IB_TICK.HIGH || field === IB_TICK.DELAYED_HIGH) {
       if (value <= 0) return
       patch.high = value
     }
-    if (field === IB_TICK.LOW) {
+    if (field === IB_TICK.LOW || field === IB_TICK.DELAYED_LOW) {
       if (value <= 0) return
       patch.low = value
     }

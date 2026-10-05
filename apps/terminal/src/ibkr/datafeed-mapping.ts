@@ -91,6 +91,7 @@ export function toQuote(quote: BackendQuote): Quote {
     currency: quote.symbol.currency,
   })
   const diagnosticReason = quote.unavailableReason?.trim()
+  const competingSession = quote.ibkrErrorCode === 10197
   return withoutUndefined<Quote>({
     symbol,
     bid: quote.bid,
@@ -105,12 +106,19 @@ export function toQuote(quote: BackendQuote): Quote {
     volume: quote.volume,
     timestamp: Date.parse(quote.timestamp),
     status: quote.status,
-    ...(diagnosticReason
+    ...(diagnosticReason || competingSession
       ? {
           diagnostic: {
             provider: 'IBKR',
-            reason: diagnosticReason,
+            ...(diagnosticReason ? { reason: diagnosticReason } : {}),
             ...(quote.ibkrErrorCode === undefined ? {} : { code: quote.ibkrErrorCode }),
+            ...(competingSession
+              ? {
+                  summary: 'Another IBKR session is using live market data.',
+                  recoveryGuidance:
+                    'Close the other active IBKR trading session, then reconnect here. Paper and live sessions can share market-data access.',
+                }
+              : {}),
           },
         }
       : {}),
@@ -146,6 +154,10 @@ export function toMarketDepth(
   }
   const limit = levels && levels > 0 ? levels : undefined
   const hasProviderDepth = depth.bids.length > 0 || depth.asks.length > 0
+  const localDepthObservation =
+    depth.diagnostic?.code == null &&
+    (depth.diagnostic?.message.startsWith('Gateway depth pending:') ||
+      depth.diagnostic?.message.startsWith('Gateway depth no response:'))
   const quoteTimestamp = quote ? Date.parse(quote.timestamp) : Number.NaN
   const useTopOfBook =
     !hasProviderDepth &&
@@ -192,7 +204,7 @@ export function toMarketDepth(
     timestamp: usingTopOfBook ? Math.max(...topTimestamps) : Date.parse(depth.updatedAt),
     diagnostic: depth.diagnostic
       ? {
-          provider: 'IBKR',
+          provider: localDepthObservation ? 'IBKR gateway' : 'IBKR',
           code: depth.diagnostic.code,
           reason: depth.diagnostic.message,
         }
@@ -202,7 +214,14 @@ export function toMarketDepth(
       ...(usingTopOfBook
         ? {
             depthSource: 'top-of-book',
-            depthCoverage: 'Best bid and ask only; Level II unavailable.',
+            depthCoverage:
+              depth.diagnostic?.code == null &&
+              depth.diagnostic?.message.startsWith('Gateway depth pending:')
+                ? 'Best bid and ask only; waiting for Level II.'
+                : depth.diagnostic?.code == null &&
+                    depth.diagnostic?.message.startsWith('Gateway depth no response:')
+                  ? 'Best bid and ask only; Level II has not responded.'
+                  : 'Best bid and ask only; Level II unavailable.',
             depthExpiresAt: Math.min(...topTimestamps) + TOP_OF_BOOK_DEPTH_MAX_AGE_MS,
             quoteStatus: quote?.status,
           }
@@ -212,11 +231,32 @@ export function toMarketDepth(
 }
 
 export function backendQuoteMatches(quote: BackendQuote, symbol: SymbolInfo): boolean {
+  const requestedSymbol = symbol.brokerSymbol ?? symbol.ticker
+  const exactRequestedSymbol = /^IBKR:[1-9][0-9]*$/.test(requestedSymbol)
+    ? requestedSymbol
+    : !['stock', 'crypto', 'forex'].includes(symbol.type ?? '')
+      ? symbol.canonicalSymbol
+      : undefined
+  const contractId = /^IBKR:([1-9][0-9]*)$/.exec(exactRequestedSymbol ?? '')?.[1]
+  const receivedContractId = quote.symbol.contractIdentity?.conId
+  const identityMatches = contractId
+    ? receivedContractId !== undefined
+      ? receivedContractId === Number(contractId)
+      : quote.symbol.canonicalSymbol === exactRequestedSymbol ||
+        quote.symbol.symbol === exactRequestedSymbol
+    : quote.symbol.symbol.toUpperCase() === requestedSymbol.toUpperCase()
   return (
-    quote.symbol.symbol === (symbol.brokerSymbol ?? symbol.ticker) &&
+    identityMatches &&
     (!symbol.exchange || quote.symbol.exchange === symbol.exchange) &&
+    (!symbol.listedExchange || quote.symbol.primaryExchange === symbol.listedExchange) &&
     (!symbol.currency || quote.symbol.currency === symbol.currency) &&
-    (!symbol.type || quote.symbol.assetClass === symbol.type)
+    (!symbol.type ||
+      quote.symbol.assetClass === symbol.type ||
+      (symbol.type === 'option' &&
+        quote.symbol.assetClass === 'futures-option' &&
+        contractId !== undefined &&
+        receivedContractId === Number(contractId) &&
+        quote.symbol.contractIdentity?.securityType === 'FOP'))
   )
 }
 

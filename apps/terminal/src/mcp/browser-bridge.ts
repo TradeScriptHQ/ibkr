@@ -9,6 +9,7 @@ import type { McpConsoleState } from './agent-console.js'
 // A batch runs its calls sequentially, so its worst case is the sum of every call. Cap the whole
 // batch instead of letting a 64-call batch occupy the bridge for the sum of 64 request timeouts.
 const BATCH_BUDGET_MS = 120_000
+const CALL_BUDGET_MS = 29_000
 // Subscriptions only shrink on an explicit `stop` or a socket close, so bound how many one
 // browser session can accumulate. Each one holds live SDK channel work in the terminal.
 const MAX_SUBSCRIPTIONS = 32
@@ -34,6 +35,12 @@ interface BridgeOptions {
   readonly onState: (state: McpConsoleState) => void
 }
 
+export interface TradeScriptMcpBridge {
+  /** Adopts the mounted SDK composition while retaining this transport's session identity. */
+  replaceAgentic(agentic: AgenticSurfaceAdapterApi): void
+  dispose(): void
+}
+
 interface CallInput {
   readonly target: TradeScriptTarget
   readonly controlId: string
@@ -51,9 +58,12 @@ function record(value: unknown): Record<string, unknown> {
 
 function errorPayload(error: unknown): { code: string; message: string } {
   const candidate = error as { code?: unknown; message?: unknown }
+  const code = typeof candidate?.code === 'string' ? candidate.code.trim() : ''
+  const message =
+    typeof candidate?.message === 'string' ? candidate.message.trim() : String(error).trim()
   return {
-    code: typeof candidate?.code === 'string' ? candidate.code : 'TRADESCRIPT_CALL_FAILED',
-    message: typeof candidate?.message === 'string' ? candidate.message : String(error),
+    code: (code || 'TRADESCRIPT_CALL_FAILED').slice(0, 160),
+    message: (message || 'The TradeScript call failed without an error message').slice(0, 2_000),
   }
 }
 
@@ -69,16 +79,35 @@ function descriptorMatches(
   )
 }
 
-export function connectTradeScriptMcp({ agentic, onState }: BridgeOptions): () => void {
+export function connectTradeScriptMcp({ agentic, onState }: BridgeOptions): TradeScriptMcpBridge {
   let disposed = false
   let socket: WebSocket | undefined
   let reconnectTimer: number | undefined
   let reconnectDelay = 250
   let activeSessionId: string | undefined
+  let attached = false
+  let authorityRevision = 0
   // The MCP process allocates its port at runtime (the desktop build picks a free one), so the
   // endpoint is only known once a bootstrap response arrives. Never guess it before then.
   let endpoint = 'the local MCP endpoint'
   const subscriptions = new Map<string, SubscriptionState>()
+
+  function publishConnected(): void {
+    const surfaces = agentic.listSurfaces()
+    const controlIds = new Set<string>()
+    for (const surface of surfaces) {
+      for (const control of agentic.listEffectiveControls({ target: surface.target })) {
+        controlIds.add(control.controlId)
+      }
+    }
+    onState({
+      phase: 'connected',
+      endpoint,
+      ...(activeSessionId === undefined ? {} : { sessionId: activeSessionId }),
+      surfaces,
+      controlCount: controlIds.size,
+    })
+  }
 
   function closeSubscriptions(): void {
     for (const subscription of subscriptions.values()) {
@@ -103,7 +132,48 @@ export function connectTradeScriptMcp({ agentic, onState }: BridgeOptions): () =
     })
   }
 
-  async function execute(method: string, paramsValue: unknown): Promise<unknown> {
+  async function invokeBeforeDeadline(
+    consumerId: string,
+    input: CallInput,
+    deadlineAt: number,
+    isActive: () => boolean,
+  ) {
+    if (!isActive() || Date.now() >= deadlineAt) {
+      throw Object.assign(
+        new Error('The MCP execution deadline or session ended before this call started'),
+        {
+          code: 'BRIDGE_EXECUTION_EXPIRED',
+        },
+      )
+    }
+    const operationId = input.requestId ?? crypto.randomUUID()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    // The race bounds bridge ownership, not the SDK operation. A timed-out operation may still
+    // complete, so preserve its identity and require reconciliation instead of claiming failure.
+    const expired = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          Object.assign(
+            new Error(
+              `Operation ${operationId} exceeded the MCP execution deadline. Its outcome is unknown; reconcile its receipt and actual trading state before retrying.`,
+            ),
+            { code: 'BRIDGE_OUTCOME_UNKNOWN', operationId },
+          ),
+        )
+      }, deadlineAt - Date.now())
+    })
+    try {
+      return await Promise.race([invoke(consumerId, { ...input, requestId: operationId }), expired])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  async function execute(
+    method: string,
+    paramsValue: unknown,
+    isActive: () => boolean,
+  ): Promise<unknown> {
     const params = record(paramsValue)
     // Routing check, not an authorization check. It confirms the request names the browser session
     // this page currently holds, so a stale or replayed request cannot be served by a newer
@@ -161,30 +231,58 @@ export function connectTradeScriptMcp({ agentic, onState }: BridgeOptions): () =
         unclassifiedTruncated: inspection.unclassifiedTruncated,
       }
     }
-    if (method === 'call') return await invoke(consumerId, params as unknown as CallInput)
+    const executionBudget = method === 'batch' ? BATCH_BUDGET_MS : CALL_BUDGET_MS
+    const deadlineAt =
+      typeof params.deadlineAt === 'number' && Number.isFinite(params.deadlineAt)
+        ? Math.min(params.deadlineAt, Date.now() + executionBudget)
+        : Date.now() + executionBudget
+    if (method === 'call') {
+      return await invokeBeforeDeadline(
+        consumerId,
+        params as unknown as CallInput,
+        deadlineAt,
+        isActive,
+      )
+    }
     if (method === 'batch') {
       const calls = params.calls as readonly CallInput[]
       const results: unknown[] = []
       // A batch runs sequentially, so without a wall-clock budget a full batch of slow calls could
       // hold this bridge for far longer than any single request timeout. Stop cleanly at the
       // deadline and report exactly where, rather than leaving the caller to guess.
-      const deadline = Date.now() + BATCH_BUDGET_MS
       let budgetExhausted = false
+      let sessionEnded = false
       for (let index = 0; index < calls.length; index += 1) {
-        if (Date.now() >= deadline) {
+        if (!isActive()) {
+          sessionEnded = true
+          break
+        }
+        if (Date.now() >= deadlineAt) {
           budgetExhausted = true
           break
         }
         const call = calls[index]
         if (call === undefined) continue
+        const operationId = call.requestId ?? crypto.randomUUID()
         try {
           results.push({
             index,
             status: 'fulfilled',
-            receipt: await invoke(consumerId, call),
+            receipt: await invokeBeforeDeadline(
+              consumerId,
+              { ...call, requestId: operationId },
+              deadlineAt,
+              isActive,
+            ),
           })
         } catch (error) {
-          results.push({ index, status: 'rejected', error: errorPayload(error) })
+          const payload = errorPayload(error)
+          if (payload.code === 'BRIDGE_OUTCOME_UNKNOWN') {
+            results.push({ index, status: 'outcome-unknown', operationId, error: payload })
+            budgetExhausted = true
+            break
+          }
+          results.push({ index, status: 'rejected', error: payload })
           if (params.stopOnError !== false) break
         }
       }
@@ -192,6 +290,7 @@ export function connectTradeScriptMcp({ agentic, onState }: BridgeOptions): () =
         sessionId,
         results,
         stoppedEarly: results.length < calls.length,
+        ...(sessionEnded ? { sessionEnded: true } : {}),
         ...(budgetExhausted
           ? {
               budgetExhausted: true,
@@ -350,28 +449,25 @@ export function connectTradeScriptMcp({ agentic, onState }: BridgeOptions): () =
           const message = McpBridgeServerMessageSchema.parse(JSON.parse(String(event.data)))
           if (message.type === 'attached') {
             reconnectDelay = 250
-            const surfaces = agentic.listSurfaces()
-            const controlIds = new Set<string>()
-            for (const surface of surfaces) {
-              for (const control of agentic.listEffectiveControls({ target: surface.target })) {
-                controlIds.add(control.controlId)
-              }
-            }
-            onState({
-              phase: 'connected',
-              endpoint: bootstrap.mcpUrl,
-              sessionId: bootstrap.sessionId,
-              surfaces,
-              controlCount: controlIds.size,
-            })
+            attached = true
+            publishConnected()
             return
           }
+          const requestAuthorityRevision = authorityRevision
+          const isActive = () =>
+            !disposed &&
+            socket === websocket &&
+            websocket.readyState === WebSocket.OPEN &&
+            activeSessionId === bootstrap.sessionId &&
+            authorityRevision === requestAuthorityRevision
           try {
-            const result = await execute(message.method, message.params)
+            const result = await execute(message.method, message.params, isActive)
+            if (!isActive()) return
             websocket.send(
               JSON.stringify({ type: 'response', id: message.id, result: result ?? null }),
             )
           } catch (error) {
+            if (!isActive()) return
             websocket.send(
               JSON.stringify({ type: 'response', id: message.id, error: errorPayload(error) }),
             )
@@ -387,6 +483,7 @@ export function connectTradeScriptMcp({ agentic, onState }: BridgeOptions): () =
       })
       websocket.addEventListener('close', () => {
         if (socket !== websocket || disposed) return
+        attached = false
         closeSubscriptions()
         onState({
           phase: 'disconnected',
@@ -414,10 +511,19 @@ export function connectTradeScriptMcp({ agentic, onState }: BridgeOptions): () =
   }
 
   void connect()
-  return () => {
-    disposed = true
-    if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
-    closeSubscriptions()
-    socket?.close(1000, 'Terminal unmounted')
+  return {
+    replaceAgentic(next) {
+      if (disposed || next === agentic) return
+      closeSubscriptions()
+      authorityRevision += 1
+      agentic = next
+      if (attached) publishConnected()
+    },
+    dispose() {
+      disposed = true
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
+      closeSubscriptions()
+      socket?.close(1000, 'Terminal unmounted')
+    },
   }
 }

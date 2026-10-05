@@ -18,19 +18,30 @@ export function remainingOwnedFill(
 }
 
 /** Reverse only the filled fraction, including each leg's ratio and close intent. */
-export function optionCloseDraft(
+type CleanupLeg = { side: 'buy' | 'sell'; quantity: number }
+export function optionCloseDraft<
+  TSymbol,
+  TOptionLeg extends CleanupLeg = NonNullable<TradingOrderDraft['optionLegs']>[number],
+  TStrategyLeg extends CleanupLeg = NonNullable<TradingOrderDraft['strategyLegs']>[number],
+>(
   filledQuantity: number,
-  draft?: TradingOrderDraft,
-): TradingOrderDraft | undefined {
+  draft?: {
+    symbol: TSymbol
+    side: 'buy' | 'sell'
+    quantity: number
+    optionLegs?: TOptionLeg[] | undefined
+    strategyLegs?: TStrategyLeg[] | undefined
+  },
+) {
   if (!(filledQuantity > 0)) return undefined
   if (!draft) throw new Error('Missing option cleanup draft')
   const fraction = filledQuantity / draft.quantity
   return {
     symbol: draft.symbol,
     side: reverseSide(draft.side),
-    type: 'market',
+    type: 'market' as const,
     quantity: filledQuantity,
-    duration: { type: 'day' },
+    duration: { type: 'day' as const },
     ...(draft.optionLegs
       ? {
           optionLegs: draft.optionLegs.map((leg) => ({
@@ -55,12 +66,12 @@ export function optionCloseDraft(
 }
 
 /** Callers supply only owned orders; existing account positions are never used for sizing. */
-export function assetCloseDraft(
+export function assetCloseDraft<TSymbol>(
   records: readonly Pick<Order, 'side' | 'filledQuantity'>[],
-  symbol: TradingOrderDraft['symbol'],
+  symbol: TSymbol,
   duration: NonNullable<TradingOrderDraft['duration']> = { type: 'day' },
   quantityStep?: number,
-): TradingOrderDraft | undefined {
+): (Omit<TradingOrderDraft, 'symbol'> & { symbol: TSymbol }) | undefined {
   const netFills = records.reduce(
     (sum, order) => sum + (order.side === 'buy' ? 1 : -1) * (order.filledQuantity ?? 0),
     0,
@@ -72,7 +83,7 @@ export function assetCloseDraft(
   return {
     symbol,
     side: filledDelta > 0 ? 'sell' : 'buy',
-    type: 'market',
+    type: 'market' as const,
     quantity: Math.abs(filledDelta),
     duration,
   }

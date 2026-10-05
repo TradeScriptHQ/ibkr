@@ -8,8 +8,6 @@ import type {
   MarketQuote,
   MarketSessionInfo,
   MarketSymbol,
-  OptionChainContract,
-  OptionChainResult,
   OptionContractResolution,
   OrderPreviewResult,
   SymbolSearchResult,
@@ -19,6 +17,7 @@ import type {
 import { request as playwrightRequest } from '@playwright/test'
 import { WebSocket } from 'ws'
 import { expect, test } from './support/fixtures.js'
+import { readExplicitOptionCatalog } from './support/option-catalog.js'
 import {
   browserHeaders,
   expectJsonOk,
@@ -141,7 +140,7 @@ test.describe('secure local gateway and TradeScript authority', () => {
     )
     const profile = connection.settings.profiles.paper
     expect(health.ibkrPort).toBe(profile.port)
-    expect(lease.paperTrading.enabled).toBe(profile.permission === 'agent')
+    expect(lease.paperTrading.enabled).toBe(profile.agentTradingEnabled)
     expect(lease.paperTrading.limits).toEqual(profile.limits)
     expect(JSON.stringify(lease)).not.toMatch(/credential|secret|npm.?token/iu)
   })
@@ -296,48 +295,24 @@ test.describe('real TWS paper state and market-data surface', () => {
 
   test('loads and resolves a real AAPL option chain', async ({ request }) => {
     test.setTimeout(120_000)
-    const quoteResponse = await request.get(
-      '/api/v1/ibkr/quotes?symbol=AAPL&exchange=SMART&currency=USD&assetClass=stock',
-      { headers: browserHeaders },
+    const { catalog, candidate, legacyAmbiguous } = await readExplicitOptionCatalog(
+      request,
+      new URLSearchParams({
+        underlying: 'AAPL',
+        exchange: 'SMART',
+        currency: 'USD',
+        quoteWindowRows: '2',
+        maxQuoteContracts: '2',
+      }),
     )
-    const aaplQuotes = await expectJsonOk<MarketQuote[]>(quoteResponse)
-    let centerPrice = aaplQuotes
-      .flatMap((quote) => [quote.last, quote.bid, quote.ask, quote.previousClose])
-      .find((value: unknown) => Number(value) > 0)
-    if (!centerPrice) {
-      const endTime = Date.now()
-      const barsResponse = await request.get(
-        `/api/v1/ibkr/bars?symbol=AAPL&exchange=SMART&primaryExchange=NASDAQ&currency=USD&assetClass=stock&interval=5m&startTime=${endTime - 7 * 24 * 60 * 60 * 1_000}&endTime=${endTime}&barCount=400`,
-        { headers: browserHeaders },
-      )
-      const history = await expectJsonOk<BarHistoryResult>(barsResponse)
-      centerPrice = history.bars.at(-1)?.close
-    }
-    if (!centerPrice) throw new Error('TWS returned no option-chain reference price')
-    const chainPath = `/api/v1/ibkr/options/chain?underlying=AAPL&exchange=SMART&currency=USD&centerPrice=${encodeURIComponent(centerPrice)}&quoteWindowRows=8&maxQuoteContracts=16`
-    const quoteDeadline = Date.now() + 15_000
-    let candidate: OptionChainContract | undefined
-    while (!candidate && Date.now() < quoteDeadline) {
-      const chainResponse = await request.get(chainPath, {
-        headers: browserHeaders,
-        timeout: 90_000,
-      })
-      const chain = await expectJsonOk<OptionChainResult>(chainResponse)
-      expect(chain.underlying).toBe('AAPL')
-      expect(chain.expirations.length).toBeGreaterThan(0)
-      const contracts = chain.expirations.flatMap((expiration) => expiration.contracts)
-      expect(contracts.length).toBeGreaterThan(0)
-      expect(contracts.every((entry) => entry.contract?.brokerContractId)).toBe(true)
-      candidate = contracts.find(
-        (entry) =>
-          entry.contract.brokerContractId && Date.parse(entry.contract.expiration) > Date.now(),
-      )
-      if (!candidate) await new Promise((resolve) => setTimeout(resolve, 300))
-    }
-    if (!candidate) throw new Error('TWS returned no unexpired option contract')
+    expect(catalog.underlying).toBe('AAPL')
+    test.info().annotations.push({
+      type: 'option-api-boundary',
+      description: `Exact native API catalog inspected; legacy class ambiguity: ${legacyAmbiguous}. Installed SDK class-selection UI remains unqualified under H13.`,
+    })
 
-    const state = await readBrokerState(request)
     const session = await openTerminalSession(request)
+    const state = await readBrokerState(request)
     const resolutionResponse = await request.post('/api/v1/ibkr/options/resolve', {
       headers: session.mutationHeaders,
       data: {
@@ -349,7 +324,14 @@ test.describe('real TWS paper state and market-data surface', () => {
     })
     const resolution = await expectJsonOk<OptionContractResolution>(resolutionResponse)
     expect(resolution.contract.underlying).toBe('AAPL')
-    expect(resolution.contract.brokerContractId).toBeTruthy()
+    expect(resolution.contract).toMatchObject({
+      brokerContractId: candidate.contract.brokerContractId,
+      expiration: candidate.contract.expiration,
+      strike: candidate.contract.strike,
+      right: candidate.contract.right,
+      multiplier: candidate.contract.multiplier,
+      tradingClass: candidate.contract.tradingClass,
+    })
     expect(resolution.tradable).not.toBe(false)
   })
 
@@ -369,17 +351,25 @@ test.describe('real TWS paper state and market-data surface', () => {
       ),
     ])
     let depth = await expectJsonOk<MarketDepth>(depthResponse)
+    const observedDepth = () =>
+      Boolean(
+        depth.bids.length ||
+          depth.asks.length ||
+          (depth.diagnostic &&
+            (depth.diagnostic.code !== undefined ||
+              !depth.diagnostic.message.startsWith('Gateway depth pending:'))),
+      )
     await expect
       .poll(
         async () => {
-          if (depth.bids.length || depth.asks.length || depth.diagnostic) return true
+          if (observedDepth()) return true
           depth = await expectJsonOk<MarketDepth>(
             await request.get(
               '/api/v1/ibkr/depth?symbol=AAPL&exchange=SMART&currency=USD&assetClass=stock&levels=20',
               { headers: browserHeaders },
             ),
           )
-          return Boolean(depth.bids.length || depth.asks.length || depth.diagnostic)
+          return observedDepth()
         },
         { timeout: 20_000 },
       )

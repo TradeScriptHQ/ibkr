@@ -80,6 +80,8 @@ export interface BrokerSymbol {
   currency?: string | undefined
   assetClass?: string | undefined
   primaryExchange?: string | undefined
+  /** Read-only provider/catalog fact; incoming drafts never establish pip authority. */
+  pipDefinition?: ContractPipDefinition | undefined
   /** Route-specific price increments returned by TWS reqMarketRule. */
   priceIncrements?: PriceIncrementBand[] | undefined
   sourceSymbol?: SourceSymbolIdentity | undefined
@@ -96,6 +98,16 @@ export interface BrokerSymbol {
         right?: string | undefined
       }
     | undefined
+}
+
+export interface ContractPipDefinition {
+  conId: number
+  securityType: string
+  currency: string
+  pipSize: number
+  unit: 'quote-price-per-pip'
+  source: 'provider-specification' | 'approved-contract-catalog'
+  reference: string
 }
 
 export interface PriceIncrementBand {
@@ -185,6 +197,7 @@ export interface OptionContract {
   strike: number
   right: 'call' | 'put'
   multiplier: number
+  tradingClass?: string | undefined
   exchange?: string | undefined
   route?: string | undefined
   currency?: string | undefined
@@ -199,6 +212,8 @@ export interface OptionChainResult {
   underlying: string
   exchange?: string | undefined
   currency?: string | undefined
+  tradingClass?: string | undefined
+  tradingClasses?: Array<{ id: string; exchange: string; multiplier: number }> | undefined
   expirations: OptionChainExpiration[]
 }
 
@@ -266,6 +281,12 @@ export interface Order extends OrderDraft {
   avgFillPrice?: number | undefined
   message?: string | undefined
   brokerOrderId?: number | undefined
+  /** Stable broker identity across client bindings and reconnects. */
+  permId?: number | undefined
+  /** API client owning the broker order id; other clients' orders are read-only here. */
+  clientId?: number | undefined
+  /** Native broker order reference, preserved independently of the API order id. */
+  brokerOrderRef?: string | undefined
 }
 
 export interface Position {
@@ -289,12 +310,20 @@ export interface PositionCloseOptions {
   confirmId?: string | undefined
   operationId?: string | undefined
   origin?: 'host' | 'human' | 'mcp' | undefined
+  /** Paper test operation ownership; validated and retained before native dispatch. */
+  paperOwnershipId?: string | undefined
 }
 
 export interface Execution {
   id: string
   accountId?: string | undefined
   orderId?: string | undefined
+  brokerOrderId?: number | undefined
+  clientId?: number | undefined
+  permId?: number | undefined
+  brokerOrderRef?: string | undefined
+  /** Broker cumulative quantity for this native execution contract, when supplied. */
+  cumulativeQuantity?: number | undefined
   positionId?: string | undefined
   symbol: BrokerSymbol
   optionContract?: OptionContract | undefined
@@ -302,6 +331,27 @@ export interface Execution {
   quantity: number
   price: number
   timestamp: string
+}
+
+/** Exact retained paper operation facts; never contains account positions for ownership inference. */
+export interface PaperOwnershipRecovery {
+  ownerId: string
+  orders: Order[]
+  executions: Execution[]
+  reconciled: boolean
+  /** A fresh, request-bound native execution replay completed for this ownership snapshot. */
+  executionsReconciled?: boolean | undefined
+  /** Complete owned stream persisted from dispatch through terminal confirmation and replay. */
+  executionCoverageFromDispatch?: boolean | undefined
+  outcome: 'known' | 'unknown'
+}
+
+export interface BrokerAccountCurrencyConversion {
+  fromCurrency: string
+  toCurrency: string
+  rate: number
+  asOf: number
+  source: string
 }
 
 export interface MarketDepthLevel {
@@ -447,7 +497,7 @@ export interface PlaceOrderResult {
   preview?: OrderPreviewResult | undefined
 }
 
-import type { ExecutionEnvironment } from './api.js'
+import type { ConnectionType, ExecutionEnvironment } from './api.js'
 
 export interface ExecutionEnvironmentBoundRequest {
   expectedExecutionEnvironment: ExecutionEnvironment
@@ -456,6 +506,7 @@ export interface ExecutionEnvironmentBoundRequest {
 export interface HealthResponse {
   ok: boolean
   mode: ExecutionEnvironment
+  connectionType?: ConnectionType | undefined
   ibkrHost: string
   ibkrPort: number
   backendPort: number
@@ -486,6 +537,7 @@ export interface MarketSymbol {
   brokerSymbol?: string | undefined
   contractIdentity?: BrokerSymbol['contractIdentity']
   contractMultiplier?: number | undefined
+  pipDefinition?: ContractPipDefinition | undefined
   canonicalSymbol?: string | undefined
   exchange?: string | undefined
   name?: string | undefined
@@ -494,6 +546,7 @@ export interface MarketSymbol {
     | 'crypto'
     | 'forex'
     | 'futures'
+    | 'futures-option'
     | 'index'
     | 'fund'
     | 'bond'
@@ -571,6 +624,9 @@ export interface MarketSessionInfo {
         minQuantity?: number | undefined
         quantityStep?: number | undefined
         contractMultiplier?: number | undefined
+        /** False when native quote-price units do not establish currency-denominated amounts. */
+        monetaryValueAvailable?: boolean | undefined
+        monetaryValueUnavailableReason?: string | undefined
         /** TIF values returned by IBKR ContractDetails for this exact instrument. */
         supportedDurations?: BrokerOrderDuration[] | undefined
         /** Order-routing venues returned by IBKR ContractDetails for this exact instrument. */
@@ -644,6 +700,12 @@ export interface BrokerInstrumentDetails {
   subcategory?: string | undefined
   minTick?: number | undefined
   priceIncrements?: PriceIncrementBand[] | undefined
+  /** Raw TWS alignment metadata; does not declare a monetary quotation-unit divisor. */
+  nativePriceMagnifier?: number | undefined
+  /** Preserve the provider's multiplier representation without inferring quote units. */
+  nativeContractMultiplier?: string | undefined
+  nativeMarketRuleIds?: string | undefined
+  nativeValidExchanges?: string | undefined
   source: string
 }
 

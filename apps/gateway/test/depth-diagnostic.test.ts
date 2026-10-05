@@ -48,6 +48,114 @@ afterEach(() => {
 })
 
 describe('market depth diagnostics', () => {
+  it('reports pending then bounded no-response without refreshing timestamps on reads', () => {
+    const { service, ib, store } = fixture()
+    const initial = service.getMarketDepth(symbol)
+    expect(initial?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
+    for (let elapsed = 0; elapsed < 14_000; elapsed += 1_000) {
+      vi.advanceTimersByTime(1_000)
+      const current = service.getMarketDepth(symbol)
+      expect(current?.updatedAt).toBe(initial?.updatedAt)
+      expect(current?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
+    }
+    vi.advanceTimersByTime(1_000)
+    expect(store.getState().marketDepth).toMatchObject({
+      updatedAt: initial?.updatedAt,
+      bids: [],
+      asks: [],
+      diagnostic: { message: expect.stringMatching(/^Gateway depth no response:/u) },
+    })
+    expect(store.getState().marketDepth?.diagnostic?.code).toBeUndefined()
+    expect(ib.reqMktDepth).toHaveBeenCalledTimes(1)
+  })
+
+  it('a late native update clears only the local no-response diagnostic', () => {
+    const { service, ib, store } = fixture()
+    const initial = service.getMarketDepth(symbol)
+    const id = ib.reqMktDepth.mock.lastCall?.[0]
+    vi.advanceTimersByTime(15_000)
+    ib.emit(EventName.updateMktDepth, id, 0, 0, 1, 250, 10)
+    expect(store.getState().marketDepth?.bids).toEqual([{ price: 250, size: 10 }])
+    expect(store.getState().marketDepth?.diagnostic).toBeUndefined()
+    expect(store.getState().marketDepth?.updatedAt).not.toBe(initial?.updatedAt)
+  })
+
+  it('new subscriptions own their deadline and refuse old timers, quotes and callbacks', () => {
+    const { service, ib, store } = fixture()
+    service.getQuotes([symbol])
+    const quoteId = ib.reqMktData.mock.lastCall?.[0]
+    service.getMarketDepth(symbol)
+    const oldId = ib.reqMktDepth.mock.lastCall?.[0]
+    vi.advanceTimersByTime(10_000)
+    service.getMarketDepth({ ...symbol, symbol: 'MSFT' })
+    const currentId = ib.reqMktDepth.mock.lastCall?.[0]
+    ib.emit(EventName.error, new Error('Competing live session'), 10197, quoteId)
+    ib.emit(EventName.error, new Error('Old depth permission'), 2152, oldId)
+    ib.emit(EventName.updateMktDepth, oldId, 0, 0, 1, 999, 1)
+    vi.advanceTimersByTime(5_000)
+    expect(store.getState().marketDepth).toMatchObject({
+      symbol: { symbol: 'MSFT' },
+      bids: [],
+      diagnostic: { message: expect.stringMatching(/^Gateway depth pending:/u) },
+    })
+    vi.advanceTimersByTime(10_000)
+    expect(store.getState().marketDepth?.diagnostic?.message).toMatch(
+      /^Gateway depth no response:/u,
+    )
+    ib.emit(EventName.updateMktDepth, currentId, 0, 0, 0, 300, 10)
+    expect(store.getState().marketDepth?.diagnostic).toBeUndefined()
+  })
+
+  it('a depth-owned native error remains the authority after the pending deadline', () => {
+    const { service, ib, store } = fixture()
+    service.getMarketDepth(symbol)
+    const id = ib.reqMktDepth.mock.lastCall?.[0]
+    ib.emit(EventName.error, new Error('Exact depth permission unavailable'), 2152, id)
+    vi.advanceTimersByTime(30_000)
+    expect(store.getState().marketDepth?.diagnostic).toEqual({
+      code: 2152,
+      message: 'Exact depth permission unavailable',
+    })
+  })
+
+  it('disconnect clears a pending timer and reconciliation starts a fresh bounded request', () => {
+    const { service, ib, store } = fixture()
+    service.getMarketDepth(symbol)
+    const oldId = ib.reqMktDepth.mock.lastCall?.[0]
+    vi.advanceTimersByTime(5_000)
+    ib.emit(EventName.disconnected)
+    const disconnected = store.getState().marketDepth
+    vi.advanceTimersByTime(20_000)
+    expect(store.getState().marketDepth).toEqual(disconnected)
+    ib.emit(EventName.connected)
+    const currentId = ib.reqMktDepth.mock.lastCall?.[0]
+    expect(currentId).not.toBe(oldId)
+    const restored = store.getState().marketDepth
+    expect(restored?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
+    ib.emit(EventName.updateMktDepth, oldId, 0, 0, 1, 999, 1)
+    expect(store.getState().marketDepth?.bids).toEqual([])
+    vi.advanceTimersByTime(14_000)
+    expect(store.getState().marketDepth?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
+    vi.advanceTimersByTime(1_000)
+    expect(store.getState().marketDepth?.diagnostic?.message).toMatch(
+      /^Gateway depth no response:/u,
+    )
+    expect(store.getState().marketDepth?.updatedAt).toBe(restored?.updatedAt)
+  })
+
+  it('a native update before the deadline clears pending and a recovered reset reason', () => {
+    const { service, ib, store } = fixture()
+    service.getMarketDepth(symbol)
+    const id = ib.reqMktDepth.mock.lastCall?.[0]
+    ib.emit(EventName.updateMktDepth, id, 0, 0, 1, 250, 10)
+    vi.advanceTimersByTime(15_000)
+    expect(store.getState().marketDepth?.diagnostic).toBeUndefined()
+    ib.emit(EventName.error, new Error('Market depth RESET'), 317, id)
+    expect(store.getState().marketDepth?.diagnostic?.code).toBe(317)
+    ib.emit(EventName.updateMktDepth, id, 0, 0, 0, 251, 20)
+    expect(store.getState().marketDepth?.diagnostic).toBeUndefined()
+  })
+
   it('retains and returns a requested tape history larger than 1000 prints', () => {
     const { service, ib } = fixture()
     service.getTimeAndSales(symbol, 1500)
@@ -215,8 +323,8 @@ describe('market depth diagnostics', () => {
       diagnostic: { code: 2152, message },
     })
     service.getMarketDepth({ ...symbol, symbol: 'MSFT' })
-    expect(store.getState().marketDepth?.diagnostic).toBeUndefined()
+    expect(store.getState().marketDepth?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
     ib.emit(EventName.error, new Error(message), 2152, id)
-    expect(store.getState().marketDepth?.diagnostic).toBeUndefined()
+    expect(store.getState().marketDepth?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
   })
 })

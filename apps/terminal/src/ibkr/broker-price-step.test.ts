@@ -6,7 +6,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-it('advertises the IBKR contract minimum tick as the trading price step', async () => {
+it('does not advertise a smallest native tick as an authoritative order price step', async () => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async () =>
@@ -32,14 +32,16 @@ it('advertises the IBKR contract minimum tick as the trading price step', async 
     },
   })
 
-  expect(info?.priceStep).toBe(0.005)
+  expect(info?.priceStep).toBeUndefined()
   expect(info?.minQuantity).toBe(0.01)
   expect(info?.quantityStep).toBe(0.01)
   expect(info?.minNotional).toBeUndefined()
   expect(info?.supportsShortSelling).toBe(true)
+  expect(info?.supportsTrailingStop).toBe(false)
+  expect(info?.supportedOrderTypes).toContain('trailing-stop')
 })
 
-it('uses the active IBKR market-rule band at the current price', async () => {
+it('preserves every native market-rule band for validation at the proposed price', async () => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async () =>
@@ -70,7 +72,11 @@ it('uses the active IBKR market-rule band at the current price', async () => {
     lastPrice: 1.2,
   })
 
-  expect(info?.priceStep).toBe(0.05)
+  expect(info?.priceStep).toBeUndefined()
+  expect(info).toHaveProperty('priceIncrements', [
+    { lowEdge: 0, increment: 0.01 },
+    { lowEdge: 1, increment: 0.05 },
+  ])
 })
 
 it('preserves IBKR minimum-tick metadata when resolving a chart symbol', async () => {
@@ -127,7 +133,7 @@ it('preserves the complete IBKR variable-tick structure on a resolved symbol', a
   })
 })
 
-it('uses resolved symbol tick metadata when broker details are unavailable', async () => {
+it('leaves native order price authority unavailable when broker details fail', async () => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async () => new Response(null, { status: 503 })),
@@ -147,7 +153,9 @@ it('uses resolved symbol tick metadata when broker details are unavailable', asy
     },
   })
 
-  expect(info?.priceStep).toBe(0.05)
+  expect(info?.priceStep).toBeUndefined()
+  expect(info).not.toHaveProperty('priceIncrements')
+  expect(info).toHaveProperty('monetaryValueAvailable', false)
 })
 
 it('requires broker futures metadata and never substitutes stock rules after a failed request', async () => {
@@ -180,7 +188,7 @@ it('advertises only the futures order types returned by the selected contract', 
     'fetch',
     vi.fn(async () =>
       Response.json({
-        symbol: { minTick: 0.25 },
+        symbol: { minTick: 0.25, priceIncrements: [{ lowEdge: 0, increment: 0.25 }] },
         metadata: {
           minQuantity: 1,
           quantityStep: 1,
@@ -259,7 +267,7 @@ it.each(['bond', 'warrant', 'commodity', 'cfd'] as const)(
   async (type) => {
     const fetch = vi.fn(async (_input: RequestInfo | URL) =>
       Response.json({
-        symbol: { minTick: 0.01 },
+        symbol: { minTick: 0.01, priceIncrements: [{ lowEdge: 0, increment: 0.01 }] },
         metadata: { minQuantity: 2, quantityStep: 2, orderTypes: 'LMT', contractMultiplier: 10 },
       }),
     )
@@ -308,7 +316,11 @@ it('keeps a bond with missing broker currency visible but untradable', async () 
 it('preserves bond sizing while leaving missing contract currency unknown', async () => {
   const fetchMock = vi.fn(async () =>
     Response.json({
-      symbol: { minTick: 0.00001, currency: '' },
+      symbol: {
+        minTick: 0.00001,
+        currency: '',
+        priceIncrements: [{ lowEdge: 0, increment: 0.00001 }],
+      },
       metadata: { minQuantity: 1, quantityStep: 1, orderTypes: 'LMT,MKT,DAY' },
     }),
   )
@@ -328,11 +340,95 @@ it('preserves bond sizing while leaving missing contract currency unknown', asyn
     currency: 'USD',
   }
   const info = await broker.getTradingSymbolInfo?.(context)
-  expect(info).toMatchObject({ minQuantity: 1, quantityStep: 1, priceStep: 0.00001 })
+  expect(info).toMatchObject({ minQuantity: 1, quantityStep: 1 })
+  expect(info?.priceStep).toBeUndefined()
+  expect(info).toHaveProperty('priceIncrements', [{ lowEdge: 0, increment: 0.00001 }])
   expect(info?.currency).toBeUndefined()
   expect(info?.contractMultiplier).toBeUndefined()
   expect(await broker.isTradable?.(context)).toMatchObject({
     tradable: false,
     reason: expect.stringContaining('contract currency'),
   })
+})
+
+it.each([
+  { priceIncrements: [{ lowEdge: 0, increment: 0 }] },
+  {
+    priceIncrements: [
+      { lowEdge: 0, increment: 0.01 },
+      { lowEdge: 0, increment: 0.05 },
+    ],
+  },
+  {
+    priceIncrements: [
+      { lowEdge: 1, increment: 0.05 },
+      { lowEdge: 0, increment: 0.01 },
+    ],
+  },
+])(
+  'does not replace invalid native market rules with minTick metadata',
+  async ({ priceIncrements }) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({ symbol: { minTick: 0.01, priceIncrements }, metadata: {} }),
+      ),
+    )
+    const broker = createIbkrHttpBrokerAdapter({ executionEnvironment: 'paper' })
+    const info = await broker.getTradingSymbolInfo?.({
+      symbol: { ticker: 'TEST', currency: 'USD', type: 'stock' },
+    })
+    expect(info?.priceStep).toBeUndefined()
+    expect(info).not.toHaveProperty('priceIncrements')
+    expect(info).not.toHaveProperty('routingDestination')
+  },
+)
+
+it('retains explicit unknown native monetary units without changing raw price rules or currency', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      Response.json({
+        symbol: { minTick: 0.000001, priceIncrements: [{ lowEdge: 0, increment: 0.5 }] },
+        metadata: {
+          monetaryValueAvailable: false,
+          monetaryValueUnavailableReason: 'Native quote monetary units are unavailable.',
+        },
+      }),
+    ),
+  )
+  const broker = createIbkrHttpBrokerAdapter({ executionEnvironment: 'paper' })
+  const symbol = { ticker: 'TEST', currency: 'GBP', type: 'stock' as const }
+  const info = await broker.getTradingSymbolInfo?.({ symbol, lastPrice: 7250.89532 })
+  expect(info).toMatchObject({
+    symbol,
+    currency: 'GBP',
+    monetaryValueAvailable: false,
+    monetaryValueUnavailableReason: 'Native quote monetary units are unavailable.',
+    priceIncrements: [{ lowEdge: 0, increment: 0.5 }],
+  })
+  expect(info?.priceStep).toBeUndefined()
+})
+
+it('loads and caches rules for the selected order route independently of the symbol quote route', async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const route = new URL(String(input)).searchParams.get('exchange')
+    return Response.json({
+      symbol: { priceIncrements: [{ lowEdge: 0, increment: route === 'ARCA' ? 0.25 : 0.01 }] },
+      metadata: {},
+    })
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  const broker = createIbkrHttpBrokerAdapter({ executionEnvironment: 'paper' })
+  const symbol = { ticker: 'TEST', exchange: 'SMART', currency: 'USD', type: 'stock' as const }
+  const selected = { symbol, routingDestination: 'ARCA' }
+  expect(await broker.getTradingSymbolInfo?.({ symbol })).toHaveProperty('priceIncrements', [
+    { lowEdge: 0, increment: 0.01 },
+  ])
+  const selectedInfo = await broker.getTradingSymbolInfo?.(selected)
+  expect(selectedInfo).toHaveProperty('priceIncrements', [{ lowEdge: 0, increment: 0.25 }])
+  expect(selectedInfo).toHaveProperty('routingDestination', 'ARCA')
+  await broker.getTradingSymbolInfo?.(selected)
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(new URL(String(fetchMock.mock.calls[1]?.[0])).searchParams.get('exchange')).toBe('ARCA')
 })

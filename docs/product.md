@@ -1,21 +1,24 @@
 # Product scope
 
-TradeScript Terminal is a local workstation connected to the user's own Interactive
+IBKR Tradescript Terminal is a local workstation connected to the user's own Interactive
 Brokers TWS session. The browser and desktop distributions share the same terminal,
 gateway and SDK integration. TWS remains responsible for broker authentication.
 
-## Connection modes and permissions
+## Connection modes and agent trading
 
 The product supports **paper and live trading**. One connection is active at a time;
-profiles keep separate ports, client IDs, account allowlists, permissions and agent
+profiles keep separate ports, client IDs, account allowlists, agent trading settings and
 limits. Standard TWS ports are defaults, not proof of account identity. Applying a
 profile requires a successful connection test and validates the account environment.
 
-| Permission | Behavior |
-| --- | --- |
-| Read-only | Inspect the connected account and market data; financial mutations are denied |
-| Manual trading | User-initiated trading is enabled for the selected accounts |
-| Manual and agent trading | Manual trading plus SDK-authorized agent operations under the configured limits |
+Manual trading is available when the connection, account, SDK authorization and audit
+ledger are ready. Broker API settings and broker acceptance still apply.
+
+The **Agent trading** switch in the top toolbar enables or disables SDK-authorized
+agent operations for the active connection. Its adjacent limits button edits the
+saved risk limits. First-time enablement requires those limits. Changing agent
+trading or its limits refreshes the workstation authority without reconnecting the
+broker or changing the connection generation.
 
 Switching profiles drains in-flight operations, replaces the broker runtime and
 reloads the terminal. Connection generation and expected environment checks prevent

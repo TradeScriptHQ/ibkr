@@ -1,4 +1,13 @@
+import {
+  type AgentRiskLimits,
+  type ConnectionType,
+  ConnectionTypeSchema,
+  type ContractPipDefinition,
+  defaultConnectionPort,
+  inferConnectionType,
+} from '@ibkr-terminal/contracts'
 import { z } from 'zod'
+import { ContractPipRegistry, PROVIDER_PIP_DEFINITIONS } from './ibkr/pip-definitions.js'
 
 const emptyToUndefined = (value: unknown): unknown =>
   typeof value === 'string' && value.trim() === '' ? undefined : value
@@ -21,6 +30,11 @@ const PositiveNumberStringSchema = z.preprocess(
   z.coerce.number().finite().positive().optional(),
 )
 
+const PositiveIntegerStringSchema = z.preprocess(
+  emptyToUndefined,
+  z.coerce.number().int().positive().optional(),
+)
+
 const OptionalStringSchema = z.preprocess(emptyToUndefined, z.string().min(1).optional())
 
 const EnvironmentSchema = z.object({
@@ -38,6 +52,7 @@ const EnvironmentSchema = z.object({
   TRADESCRIPT_REQUESTED_ORIGIN: OptionalStringSchema,
   IBKR_HOST: OptionalStringSchema,
   IBKR_PORT: IntegerStringSchema,
+  IBKR_CONNECTION_TYPE: z.preprocess(emptyToUndefined, ConnectionTypeSchema.optional()),
   IBKR_CLIENT_ID: IntegerStringSchema,
   IBKR_MASTER_CLIENT_ID: IntegerStringSchema,
   IBKR_BIND_MANUAL_TWS_ORDERS: BooleanStringSchema,
@@ -47,6 +62,7 @@ const EnvironmentSchema = z.object({
     z.literal('I_UNDERSTAND').optional(),
   ),
   IBKR_ALLOWED_ACCOUNT_IDS: OptionalStringSchema,
+  IBKR_CONTRACT_PIP_DEFINITIONS: OptionalStringSchema,
   AGENT_TRADING_ENABLED: BooleanStringSchema,
   AGENT_AUTONOMY_MODE: z.preprocess(emptyToUndefined, z.literal('paper-auto').optional()),
   AGENT_MAX_ORDER_QUANTITY: PositiveNumberStringSchema,
@@ -55,7 +71,7 @@ const EnvironmentSchema = z.object({
   AGENT_MAX_POSITION_NOTIONAL: PositiveNumberStringSchema,
   AGENT_MAX_GROSS_EXPOSURE: PositiveNumberStringSchema,
   AGENT_MAX_DAILY_LOSS: PositiveNumberStringSchema,
-  AGENT_MAX_ORDERS_PER_MINUTE: PositiveNumberStringSchema,
+  AGENT_MAX_ORDERS_PER_MINUTE: PositiveIntegerStringSchema,
   AGENT_MAX_ESTIMATED_SLIPPAGE_BPS: PositiveNumberStringSchema,
   AGENT_MAX_MARKET_DATA_AGE_MS: PositiveNumberStringSchema,
   AGENT_MAX_LEVERAGE: PositiveNumberStringSchema,
@@ -133,20 +149,6 @@ function allOrNone(label: string, values: Readonly<Record<string, string | undef
   return configured > 0
 }
 
-export interface AgentRiskLimits {
-  readonly maxOrderQuantity: number
-  readonly maxOrderNotional: number
-  readonly maxPositionQuantity: number
-  readonly maxPositionNotional: number
-  readonly maxGrossExposure?: number | undefined
-  readonly maxDailyLoss: number
-  readonly maxOrdersPerMinute: number
-  readonly maxEstimatedSlippageBps: number
-  readonly maxMarketDataAgeMs: number
-  readonly maxLeverage: number
-  readonly maxUnprotectedPositionQuantity: number
-}
-
 export interface GatewayConfig {
   readonly nodeEnvironment: 'development' | 'test' | 'production'
   readonly ui: {
@@ -175,9 +177,11 @@ export interface GatewayConfig {
     readonly masterClientId: number
     readonly bindManualOrders: boolean
     readonly executionEnvironment: 'paper' | 'live'
+    readonly connectionType?: ConnectionType
     readonly liveOrdersEnabled: boolean
     readonly tradingEnabled?: boolean
     readonly allowedAccountIds: readonly string[]
+    readonly contractPipDefinitions?: readonly ContractPipDefinition[]
   }
   readonly agents: {
     readonly enabled: boolean
@@ -194,7 +198,8 @@ export function loadGatewayConfig(environment: NodeJS.ProcessEnv = process.env):
   const uiPort = parsed.UI_PORT ?? 3000
   const gatewayPort = parsed.GATEWAY_PORT ?? 3001
   const executionEnvironment = parsed.IBKR_EXECUTION_ENVIRONMENT ?? 'paper'
-  const ibkrPort = parsed.IBKR_PORT ?? (executionEnvironment === 'live' ? 7496 : 7497)
+  const connectionType = parsed.IBKR_CONNECTION_TYPE ?? inferConnectionType(parsed.IBKR_PORT)
+  const ibkrPort = parsed.IBKR_PORT ?? defaultConnectionPort(executionEnvironment, connectionType)
   const clientId = parsed.IBKR_CLIENT_ID ?? 0
   const masterClientId = parsed.IBKR_MASTER_CLIENT_ID ?? 0
   const bindManualOrders = parsed.IBKR_BIND_MANUAL_TWS_ORDERS ?? false
@@ -240,11 +245,7 @@ export function loadGatewayConfig(environment: NodeJS.ProcessEnv = process.env):
   if (agentsEnabled) {
     const missing: string[] = []
     if (allowedAccountIds.length === 0) missing.push('IBKR_ALLOWED_ACCOUNT_IDS')
-    if (parsed.AGENT_MAX_ORDER_QUANTITY === undefined) missing.push('AGENT_MAX_ORDER_QUANTITY')
     if (parsed.AGENT_MAX_ORDER_NOTIONAL === undefined) missing.push('AGENT_MAX_ORDER_NOTIONAL')
-    if (parsed.AGENT_MAX_POSITION_QUANTITY === undefined) {
-      missing.push('AGENT_MAX_POSITION_QUANTITY')
-    }
     if (parsed.AGENT_MAX_POSITION_NOTIONAL === undefined) {
       missing.push('AGENT_MAX_POSITION_NOTIONAL')
     }
@@ -260,18 +261,15 @@ export function loadGatewayConfig(environment: NodeJS.ProcessEnv = process.env):
       missing.push('AGENT_MAX_MARKET_DATA_AGE_MS')
     }
     if (parsed.AGENT_MAX_LEVERAGE === undefined) missing.push('AGENT_MAX_LEVERAGE')
-    if (parsed.AGENT_MAX_UNPROTECTED_POSITION_QUANTITY === undefined) {
-      missing.push('AGENT_MAX_UNPROTECTED_POSITION_QUANTITY')
-    }
     if (missing.length > 0) {
       throw new Error(
         `Agent paper trading is enabled but required limits are missing: ${missing.join(', ')}`,
       )
     }
     riskLimits = {
-      maxOrderQuantity: parsed.AGENT_MAX_ORDER_QUANTITY as number,
+      maxOrderQuantity: parsed.AGENT_MAX_ORDER_QUANTITY ?? null,
       maxOrderNotional: parsed.AGENT_MAX_ORDER_NOTIONAL as number,
-      maxPositionQuantity: parsed.AGENT_MAX_POSITION_QUANTITY as number,
+      maxPositionQuantity: parsed.AGENT_MAX_POSITION_QUANTITY ?? null,
       maxPositionNotional: parsed.AGENT_MAX_POSITION_NOTIONAL as number,
       maxGrossExposure: parsed.AGENT_MAX_GROSS_EXPOSURE as number,
       maxDailyLoss: parsed.AGENT_MAX_DAILY_LOSS as number,
@@ -279,7 +277,7 @@ export function loadGatewayConfig(environment: NodeJS.ProcessEnv = process.env):
       maxEstimatedSlippageBps: parsed.AGENT_MAX_ESTIMATED_SLIPPAGE_BPS as number,
       maxMarketDataAgeMs: parsed.AGENT_MAX_MARKET_DATA_AGE_MS as number,
       maxLeverage: parsed.AGENT_MAX_LEVERAGE as number,
-      maxUnprotectedPositionQuantity: parsed.AGENT_MAX_UNPROTECTED_POSITION_QUANTITY as number,
+      maxUnprotectedPositionQuantity: parsed.AGENT_MAX_UNPROTECTED_POSITION_QUANTITY ?? null,
     }
   }
 
@@ -312,8 +310,10 @@ export function loadGatewayConfig(environment: NodeJS.ProcessEnv = process.env):
       masterClientId,
       bindManualOrders,
       executionEnvironment,
+      connectionType,
       liveOrdersEnabled,
       allowedAccountIds,
+      contractPipDefinitions: parseContractPipDefinitions(parsed.IBKR_CONTRACT_PIP_DEFINITIONS),
     },
     agents: {
       enabled: agentsEnabled,
@@ -321,4 +321,32 @@ export function loadGatewayConfig(environment: NodeJS.ProcessEnv = process.env):
       ...(riskLimits === undefined ? {} : { riskLimits }),
     },
   }
+}
+
+const ContractPipDefinitionSchema = z
+  .object({
+    conId: z.number().int().positive(),
+    securityType: z.string().trim().min(1),
+    currency: z.string().trim().min(1),
+    pipSize: z.number().finite().positive(),
+    unit: z.literal('quote-price-per-pip'),
+    source: z.enum(['provider-specification', 'approved-contract-catalog']),
+    reference: z.string().trim().min(1),
+  })
+  .strict()
+function parseContractPipDefinitions(value: string | undefined): readonly ContractPipDefinition[] {
+  if (value === undefined) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error('IBKR_CONTRACT_PIP_DEFINITIONS must be an approved JSON contract catalog.')
+  }
+  const result = z.array(ContractPipDefinitionSchema).safeParse(parsed)
+  if (!result.success)
+    throw new Error(
+      'IBKR_CONTRACT_PIP_DEFINITIONS requires exact contract identity, pip unit and source reference.',
+    )
+  new ContractPipRegistry([...PROVIDER_PIP_DEFINITIONS, ...result.data])
+  return result.data
 }

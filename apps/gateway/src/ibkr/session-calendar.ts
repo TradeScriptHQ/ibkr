@@ -1,5 +1,6 @@
 import type { ContractDetails } from '@stoqey/ib'
 import { normalizeRoutingDestination } from './contracts.js'
+import { nativeMonetaryUnits } from './monetary-units.js'
 import type {
   BrokerOrderDuration,
   MarketSessionInfo,
@@ -36,7 +37,7 @@ export function toMarketSessionInfo(
     .sort((a, b) => a.opensAt - b.opensAt)
   const upcoming = [
     ...(todayClosed && !currentDayWeekend
-      ? [{ opensAt: dayStart, closesAt: dayEnd, state: 'holiday' as MarketSessionState }]
+      ? holidayWindowsOutsideTrading(dayStart, dayEnd, baseWindows)
       : []),
     ...derived.filter(
       (window) => window.closesAt > asOf || (window.closesAt > dayStart && window.opensAt < dayEnd),
@@ -64,7 +65,7 @@ export function toMarketSessionInfo(
     asOf,
     upcoming,
     note:
-      todayClosed && !currentDayWeekend
+      currentState === 'holiday'
         ? 'Closed by IBKR schedule'
         : hasScheduleEvidence
           ? undefined
@@ -77,7 +78,7 @@ export function toMarketSessionInfo(
       regularClose,
       earlyClose:
         regularClose != null ? isEarlyRegularClose(regularClose, timezone, symbol) : undefined,
-      holidayName: todayClosed && !currentDayWeekend ? 'IBKR closed' : undefined,
+      holidayName: currentState === 'holiday' ? 'IBKR closed' : undefined,
       tradingHours: details.tradingHours,
       liquidHours: details.liquidHours,
       timeZoneId: details.timeZoneId,
@@ -85,6 +86,7 @@ export function toMarketSessionInfo(
       minQuantity: details.minSize,
       quantityStep: details.sizeIncrement,
       contractMultiplier: details.contract.multiplier,
+      ...nativeMonetaryUnits(details),
       routingDestinations,
       defaultRoutingDestination,
       allOrNone: supportsAdvancedStockControls
@@ -92,8 +94,14 @@ export function toMarketSessionInfo(
         : undefined,
       oca: {
         behaviors: [
-          { value: 'cancel-with-block', label: 'Cancel remaining orders with block' },
-          { value: 'reduce-with-block', label: 'Reduce remaining orders with block' },
+          {
+            value: 'cancel-with-block',
+            label: 'Cancel remaining orders with block',
+          },
+          {
+            value: 'reduce-with-block',
+            label: 'Reduce remaining orders with block',
+          },
           {
             value: 'reduce-without-block',
             label: 'Reduce remaining orders without block',
@@ -104,6 +112,28 @@ export function toMarketSessionInfo(
       validExchanges: details.validExchanges,
     },
   }
+}
+
+function holidayWindowsOutsideTrading(
+  dayStart: number,
+  dayEnd: number,
+  trading: ParsedSchedule['windows'],
+): MarketSessionWindow[] {
+  const windows: MarketSessionWindow[] = []
+  let cursor = dayStart
+  for (const window of [...trading].sort((left, right) => left.opensAt - right.opensAt)) {
+    if (window.closesAt <= cursor || window.opensAt >= dayEnd) continue
+    if (window.opensAt > cursor) {
+      windows.push({
+        opensAt: cursor,
+        closesAt: window.opensAt,
+        state: 'holiday',
+      })
+    }
+    cursor = Math.max(cursor, window.closesAt)
+  }
+  if (cursor < dayEnd) windows.push({ opensAt: cursor, closesAt: dayEnd, state: 'holiday' })
+  return windows
 }
 
 function brokerRoutingDestinations(
@@ -259,7 +289,11 @@ export function parseIbSchedule(raw: string | undefined, timezone: string): Pars
       const open = parseIbScheduleEndpoint(rawOpen, dayKey, timezone)
       const close = parseIbScheduleEndpoint(rawClose, dayKey, timezone)
       if (!open || !close || close.time <= open.time) continue
-      windows.push({ dateKey: dayKey, opensAt: open.time, closesAt: close.time })
+      windows.push({
+        dateKey: dayKey,
+        opensAt: open.time,
+        closesAt: close.time,
+      })
     }
   }
   return {
@@ -282,7 +316,10 @@ function parseIbScheduleEndpoint(
     return { key, time: zonedTimeToUtc(key, withDate[2], timezone) }
   }
   if (/^\d{4}$/.test(trimmed)) {
-    return { key: fallbackDateKey, time: zonedTimeToUtc(fallbackDateKey, trimmed, timezone) }
+    return {
+      key: fallbackDateKey,
+      time: zonedTimeToUtc(fallbackDateKey, trimmed, timezone),
+    }
   }
   return undefined
 }

@@ -1,6 +1,6 @@
 # Software and licences
 
-TradeScript Terminal is an open-source, locally installed interface to a user's
+IBKR Tradescript Terminal is an open-source, locally installed interface to a user's
 own Interactive Brokers TWS session. The terminal, gateway, and desktop wrapper
 are provided under the repository's Apache 2.0 licence.
 

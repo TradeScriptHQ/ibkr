@@ -1,9 +1,11 @@
-import { ChartUiThemeProvider, StandardModal } from '@tradescript/pro/react/ui'
-import type { ChartTheme } from '@tradescript/pro/sdk'
-import { chartButtonThemeStyle } from '@tradescript/pro/sdk/theme'
+import { invoke, isTauri } from '@tauri-apps/api/core'
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { AppNotification } from './app-notifications.js'
+import { AppModal } from './appearance-ui.js'
+import { loadApplicationSetupStatus } from './application-setup-status.js'
+import { APP_LOGO, APP_NAME } from './branding.js'
 import { ConnectionSettingsButton } from './connection-settings.js'
-import { LegalNotices } from './legal-notices.js'
+import { DesktopSetupToolbar } from './desktop-chrome.js'
 import {
   type SetupStatus,
   sdkAccessNeedsRenewal,
@@ -12,24 +14,8 @@ import {
   sdkRenewalPending,
 } from './sdk-authorization.js'
 import { bootstrapBrowserSession, CLIENT_HEADERS } from './terminal-session.js'
-import { WORKSTATION_THEME } from './workstation-theme.js'
+import type { WorkstationSetupState } from './workstation-startup.js'
 
-const settingsTheme: ChartTheme = {
-  ...WORKSTATION_THEME,
-  ui: {
-    ...WORKSTATION_THEME.ui,
-    modal: {
-      ...WORKSTATION_THEME.ui?.modal,
-      background: 'rgba(19, 29, 42, 0.96)',
-      mutedText: '#aab9cb',
-    },
-  },
-}
-const themeStyle = Object.fromEntries(
-  Object.entries(chartButtonThemeStyle(settingsTheme)).filter(
-    ([, value]) => typeof value === 'string' || typeof value === 'number',
-  ),
-)
 const OPEN_SETTINGS = 'terminal:application-settings'
 
 interface ApplicationSetupContentProps {
@@ -39,13 +25,11 @@ interface ApplicationSetupContentProps {
   credentialId: string
   credentialSecret: string
   busy: boolean
-  error: string
   statusError: string
   sessionExpired: boolean
   onCredentialId: (value: string) => void
   onCredentialSecret: (value: string) => void
   onActivate: () => void
-  onRetry: () => void
   onReplace: () => void
   onCancelReplacement: () => void
   onRefresh: () => void
@@ -61,19 +45,19 @@ export function ApplicationSetupContent({
   credentialId,
   credentialSecret,
   busy,
-  error,
   statusError,
   sessionExpired,
   onCredentialId,
   onCredentialSecret,
   onActivate,
-  onRetry,
   onReplace,
   onCancelReplacement,
   onRefresh,
   onReload,
   onClearCredentials,
 }: ApplicationSetupContentProps) {
+  const [credentialPageError, setCredentialPageError] = useState('')
+  const [credentialPageAttempt, setCredentialPageAttempt] = useState(0)
   const renewing = status !== undefined && sdkRenewalPending(status.sdk)
   const recovery = status?.sdk.configured && !status.sdk.ready && !renewing
   const notice = status && sdkAuthorizationNotice(status.sdk)
@@ -84,14 +68,14 @@ export function ApplicationSetupContent({
   return (
     <div className={`setup-content${settingsMode ? ' setup-settings' : ''}`}>
       <div className="setup-heading">
-        <img className="brand-mark" src="/tradescript-mark.svg" alt="" />
+        <img className="brand-mark" src={APP_LOGO} alt="" />
         <div>
           <strong>
             {settingsMode
               ? 'TradeScript SDK'
               : recovery
                 ? 'Restore SDK access'
-                : 'Welcome to TradeScript'}
+                : `Welcome to ${APP_NAME}`}
           </strong>
           <p>
             {settingsMode
@@ -100,23 +84,10 @@ export function ApplicationSetupContent({
           </p>
         </div>
       </div>
-      {notice && (
-        <div className="setup-authorization-notice" role="alert">
-          <strong>{notice.title}</strong>
-          <p>{notice.message}</p>
-          <button type="button" disabled={busy} onClick={onRetry}>
-            {busy ? 'Please wait…' : 'Retry authorization'}
-          </button>
-        </div>
-      )}
       {(renewing || (recovery && !notice)) && <p role="status">Checking SDK authorization…</p>}
       {settingsMode ? (
         <section className="setup-settings-section" aria-label="SDK access">
-          {status?.sdk.ready && (
-            <p className="setup-success" role="status">
-              SDK credentials saved · Activated
-            </p>
-          )}
+          {status?.sdk.ready && <p className="setup-success">SDK credentials saved · Activated</p>}
           {!replacementRequested && (
             <button type="button" disabled={busy} onClick={onReplace}>
               Replace credentials
@@ -148,12 +119,31 @@ export function ApplicationSetupContent({
               </p>
             </div>
           </div>
-          {status?.sdk.ready && (
-            <p className="setup-success" role="status">
-              SDK credentials saved · Activated
-            </p>
-          )}
+          {status?.sdk.ready && <p className="setup-success">SDK credentials saved · Activated</p>}
         </>
+      )}
+      <p className="setup-credential-help">
+        <a
+          href="https://console.tradescript.dev/app/deployments/localhost"
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(event) => {
+            if (!isTauri()) return
+            event.preventDefault()
+            setCredentialPageAttempt((attempt) => attempt + 1)
+            setCredentialPageError('')
+            void invoke('open_credentials_page').catch(() => {
+              setCredentialPageError(
+                'Could not open your browser. Visit console.tradescript.dev to get your credentials.',
+              )
+            })
+          }}
+        >
+          Get credentials
+        </a>
+      </p>
+      {credentialPageError && (
+        <AppNotification message={credentialPageError} occurrence={credentialPageAttempt} />
       )}
       {showCredentials && (
         <form
@@ -229,7 +219,7 @@ export function ApplicationSetupContent({
         >
           <div>
             <strong>Connection settings saved</strong>
-            <p>Manage your TWS or IB Gateway connection and trading permissions.</p>
+            <p>Manage your TWS or IB Gateway connection.</p>
           </div>
           <ConnectionSettingsButton />
         </section>
@@ -241,15 +231,13 @@ export function ApplicationSetupContent({
               <strong>Connect your broker</strong>
               <p>
                 Choose Paper or Live and TWS or IB Gateway, then connect. Advanced settings include
-                a custom port and trading permissions. Accounts are discovered from your broker.
+                a custom port. Accounts are discovered from your broker.
               </p>
             </div>
           </div>
           {status?.sdk.configured && <ConnectionSettingsButton inline />}
         </>
       )}
-      {error && <p role="alert">{error}</p>}
-      {statusError && <p role="alert">{statusError}</p>}
       {sessionExpired ? (
         <button type="button" onClick={onReload}>
           Reload workstation
@@ -261,11 +249,6 @@ export function ApplicationSetupContent({
           </button>
         )
       )}
-      <LegalNotices />
-      <p className="setup-legal">
-        The terminal and proprietary SDK have separate licences. Desktop distributions include both
-        in their legal notices.
-      </p>
     </div>
   )
 }
@@ -299,18 +282,37 @@ export function ApplicationSettingsButton() {
     <button
       type="button"
       className="chart-data-action"
+      aria-label="SDK settings"
+      title="SDK settings"
       onClick={() => window.dispatchEvent(new Event(OPEN_SETTINGS))}
     >
-      SDK settings
+      <svg
+        width="15"
+        height="15"
+        viewBox="0 0 20 20"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        aria-hidden="true"
+      >
+        <path d="m8 2-.5 2-1.3.8-2-.6-2 3.4 1.6 1.4v1.6L2.2 12l2 3.4 2-.6 1.3.8.5 2h4l.5-2 1.3-.8 2 .6 2-3.4-1.6-1.4V9l1.6-1.4-2-3.4-2 .6-1.3-.8-.5-2Z" />
+        <circle cx="10" cy="10" r="2.6" />
+      </svg>
     </button>
   )
 }
 
-export function ApplicationSetup({ children }: { children: ReactNode }) {
+export function ApplicationSetup({
+  children,
+}: {
+  children: (setup: WorkstationSetupState) => ReactNode
+}) {
   const [status, setStatus] = useState<SetupStatus>()
   const [error, setError] = useState('')
+  const [notificationAttempt, setNotificationAttempt] = useState(0)
   const [statusError, setStatusError] = useState('')
   const [sessionExpired, setSessionExpired] = useState(false)
+  const [recoveringSession, setRecoveringSession] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [replacementRequested, setReplacementRequested] = useState(false)
   const [credentialId, setCredentialId] = useState('')
@@ -318,6 +320,8 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false)
   const mutationInFlight = useRef(false)
   const requestGeneration = useRef(0)
+  const refreshInFlight = useRef<{ generation: number; promise: Promise<SetupStatus> }>(undefined)
+  const mounted = useRef(false)
   const mock = import.meta.env.VITE_TRADING_MODE === 'mock'
   const clearReplacement = () => {
     setReplacementRequested(false)
@@ -332,32 +336,53 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
   }
   const refresh = useCallback(async (isClosed: () => boolean = () => false) => {
     if (mock || mutationInFlight.current) return
-    const generation = ++requestGeneration.current
-    try {
-      await bootstrapBrowserSession()
-      const response = await fetch('/api/v1/setup', {
-        headers: CLIENT_HEADERS,
-        signal: AbortSignal.timeout(5000),
-      })
-      if (response.status === 401 && !isClosed() && generation === requestGeneration.current) {
-        setSessionExpired(true)
-        throw new Error('Your local session expired. Reload the workstation to restore access.')
+    let request = refreshInFlight.current
+    if (!request || request.generation !== requestGeneration.current) {
+      const generation = ++requestGeneration.current
+      request = {
+        generation,
+        promise: loadApplicationSetupStatus(() => {
+          if (
+            !mounted.current ||
+            generation !== requestGeneration.current ||
+            mutationInFlight.current
+          )
+            throw new DOMException('The setup request was superseded.', 'AbortError')
+          setSessionExpired(true)
+          setRecoveringSession(true)
+          setStatusError('')
+        }),
       }
-      if (!response.ok)
-        throw new Error(
-          'Could not load application setup. Check that the local gateway is running.',
-        )
-      const next: SetupStatus = await response.json()
-      if (!isClosed() && generation === requestGeneration.current && !mutationInFlight.current) {
+      refreshInFlight.current = request
+    }
+    const { generation } = request
+    try {
+      const next = await request.promise
+      if (
+        mounted.current &&
+        !isClosed() &&
+        generation === requestGeneration.current &&
+        !mutationInFlight.current
+      ) {
         setStatus(next)
         setStatusError('')
+        setSessionExpired(false)
+        setRecoveringSession(false)
       }
     } catch (cause) {
-      if (!isClosed() && generation === requestGeneration.current && !mutationInFlight.current)
+      if (
+        mounted.current &&
+        !isClosed() &&
+        generation === requestGeneration.current &&
+        !mutationInFlight.current
+      )
         setStatusError(cause instanceof Error ? cause.message : 'Setup is unavailable.')
+    } finally {
+      if (refreshInFlight.current === request) refreshInFlight.current = undefined
     }
   }, [])
   useEffect(() => {
+    mounted.current = true
     let closed = false
     let timer: ReturnType<typeof setTimeout>
     const poll = async () => {
@@ -368,6 +393,7 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
     void poll()
     window.addEventListener('focus', onFocus)
     return () => {
+      mounted.current = false
       closed = true
       clearTimeout(timer)
       window.removeEventListener('focus', onFocus)
@@ -380,6 +406,7 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
   }, [])
   const activate = async () => {
     if (mutationInFlight.current) return
+    setNotificationAttempt((attempt) => attempt + 1)
     mutationInFlight.current = true
     ++requestGeneration.current
     setBusy(true)
@@ -417,6 +444,7 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
   }
   const retry = async () => {
     if (mutationInFlight.current) return
+    setNotificationAttempt((attempt) => attempt + 1)
     mutationInFlight.current = true
     ++requestGeneration.current
     setBusy(true)
@@ -444,6 +472,7 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
   }
   const clearCredentials = async () => {
     if (mutationInFlight.current) return
+    setNotificationAttempt((attempt) => attempt + 1)
     mutationInFlight.current = true
     ++requestGeneration.current
     setBusy(true)
@@ -486,11 +515,17 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
       void refresh()
     }
   }
-  if (mock) return children
+  if (mock) return children({ ready: true, stage: 'authorization', error: '', retry: refresh })
   // A pending renewal keeps the workstation open; recovery starts only once it fails.
   const renewing = status !== undefined && sdkRenewalPending(status.sdk)
   const complete =
     status?.sdk.configured && (status.sdk.ready || renewing) && status.connectionConfigured
+  const checkingSetup =
+    status === undefined ||
+    (status.sdk.configured &&
+      status.connectionConfigured &&
+      status.sdk.state === 'exchanging' &&
+      !status.sdk.failure)
   const notice = status && sdkAuthorizationNotice(status.sdk)
   const accessNeedsRenewal = status !== undefined && sdkAccessNeedsRenewal(status.sdk)
   const content = (
@@ -500,14 +535,12 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
       replacementRequested={replacementRequested}
       credentialId={credentialId}
       credentialSecret={credentialSecret}
-      busy={busy}
-      error={error}
+      busy={busy || recoveringSession}
       statusError={statusError}
       sessionExpired={sessionExpired}
       onCredentialId={setCredentialId}
       onCredentialSecret={setCredentialSecret}
       onActivate={() => void activate()}
-      onRetry={() => void retry()}
       onReplace={() => setReplacementRequested(true)}
       onCancelReplacement={clearReplacement}
       onRefresh={() => void refresh()}
@@ -516,52 +549,67 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
     />
   )
   return (
-    <ChartUiThemeProvider theme="dark" themeStyle={themeStyle}>
-      {complete && sessionExpired && !settingsOpen ? (
-        <aside className="sdk-authorization-notice" role="alert">
-          <strong>Your local session expired</strong>
-          <p>Reload the workstation to restore access. Your saved settings are preserved.</p>
-          <button type="button" onClick={() => window.location.reload()}>
-            Reload workstation
-          </button>
-        </aside>
+    <>
+      <AppNotification message={error} occurrence={notificationAttempt} />
+      {!recoveringSession && status !== undefined && <AppNotification message={statusError} />}
+      {recoveringSession ? (
+        <AppNotification
+          title="Reconnecting to local gateway"
+          message={statusError || 'Your workstation session will be restored automatically.'}
+          tone={statusError ? 'error' : 'info'}
+          action={
+            statusError ? { label: 'Retry connection', onClick: () => void refresh() } : undefined
+          }
+        />
+      ) : complete && sessionExpired ? (
+        <AppNotification
+          title="Your local session expired"
+          message="Reload the workstation to restore access. Your saved settings are preserved."
+          action={{ label: 'Reload workstation', onClick: () => window.location.reload() }}
+        />
       ) : (
-        complete &&
-        notice &&
-        !settingsOpen && (
-          <aside className="sdk-authorization-notice" role="alert">
-            <strong>{notice.title}</strong>
-            <p>{notice.message}</p>
-            {error && <p>{error}</p>}
-            {status?.sdk.failure === 'unavailable' || accessNeedsRenewal ? (
-              <button type="button" disabled={busy} onClick={() => void retry()}>
-                {busy ? 'Please wait…' : 'Retry authorization'}
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  setReplacementRequested(true)
-                  setSettingsOpen(true)
-                }}
-              >
-                Update SDK credentials
-              </button>
-            )}
-          </aside>
+        notice && (
+          <AppNotification
+            title={notice.title}
+            message={notice.message}
+            tone="warning"
+            action={
+              !complete || status?.sdk.failure === 'unavailable' || accessNeedsRenewal
+                ? {
+                    label: busy ? 'Please wait…' : 'Retry authorization',
+                    disabled: busy,
+                    onClick: () => void retry(),
+                  }
+                : {
+                    label: 'Update SDK credentials',
+                    onClick: () => {
+                      setReplacementRequested(true)
+                      setSettingsOpen(true)
+                    },
+                  }
+            }
+          />
         )
       )}
-      {complete ? (
-        children
+      {checkingSetup || complete ? (
+        children({
+          ready: Boolean(complete),
+          stage: status === undefined ? 'setup' : 'authorization',
+          error: statusError,
+          retry: refresh,
+        })
       ) : (
-        <main className="setup-page">
-          <section className="setup-card" aria-label="Workstation setup">
-            {content}
-          </section>
-        </main>
+        <>
+          <DesktopSetupToolbar />
+          <main className="setup-page">
+            <section className="setup-card" aria-label="Workstation setup">
+              {content}
+            </section>
+          </main>
+        </>
       )}
       {complete && (
-        <StandardModal
+        <AppModal
           open={settingsOpen}
           onOpenChange={changeSettingsOpen}
           title="Application settings"
@@ -573,8 +621,8 @@ export function ApplicationSetup({ children }: { children: ReactNode }) {
           closeDisabled={busy}
         >
           {content}
-        </StandardModal>
+        </AppModal>
       )}
-    </ChartUiThemeProvider>
+    </>
   )
 }

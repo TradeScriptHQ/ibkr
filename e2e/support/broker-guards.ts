@@ -1,11 +1,19 @@
-import type { APIRequestContext, BrowserContext } from '@playwright/test'
+import type { APIRequestContext, APIResponse, BrowserContext } from '@playwright/test'
 import { isBrokerMutation } from './order-safety.js'
+import type { PreparedPaperRequest } from './paper-order-tracker.js'
 import { TERMINAL_ORIGIN } from './session.js'
 
 /** Wrap only the test request context; authentication tests retain their own cookies. */
 export function guardBrokerRequests(
   request: APIRequestContext,
   mutations: boolean,
+  onResponse?: (response: APIResponse, method: string, attemptId?: string) => Promise<void>,
+  prepareRequest?: (
+    url: string,
+    method: string,
+    body: unknown,
+    headers?: Record<string, string>,
+  ) => PreparedPaperRequest,
 ): APIRequestContext {
   return new Proxy(request, {
     get(target, property) {
@@ -22,7 +30,20 @@ export function guardBrokerRequests(
             `Read-only E2E blocked ${method} ${new URL(url, TERMINAL_ORIGIN).pathname}`,
           )
         }
-        return Reflect.apply(value, target, args)
+        const options = args[1] as { data?: unknown; headers?: Record<string, string> } | undefined
+        const prepared =
+          url && prepareRequest
+            ? prepareRequest(url, method, options?.data, options?.headers)
+            : undefined
+        const forwarded = prepared
+          ? [args[0], { ...options, data: prepared.body }, ...args.slice(2)]
+          : args
+        const result = Reflect.apply(value, target, forwarded)
+        if (!url || !onResponse) return result
+        return Promise.resolve(result as Promise<APIResponse>).then(async (response) => {
+          await onResponse(response, method, prepared?.attemptId)
+          return response
+        })
       }
     },
   })
@@ -31,6 +52,7 @@ export function guardBrokerRequests(
 export async function guardBrowserMutations(
   context: BrowserContext,
   mutations: boolean,
+  prepareRequest?: (request: import('@playwright/test').Request) => PreparedPaperRequest,
 ): Promise<string[]> {
   const blocked: string[] = []
   await context.route('**/api/v1/ibkr/**', async (route) => {
@@ -38,7 +60,12 @@ export async function guardBrowserMutations(
     if (!mutations && isBrokerMutation(request.method(), request.url())) {
       blocked.push(`${request.method()} ${new URL(request.url()).pathname}`)
       await route.abort('blockedbyclient')
-    } else await route.fallback()
+    } else {
+      const prepared = prepareRequest?.(request)
+      await route.fallback(
+        prepared?.attemptId ? { postData: JSON.stringify(prepared.body) } : undefined,
+      )
+    }
   })
   return blocked
 }

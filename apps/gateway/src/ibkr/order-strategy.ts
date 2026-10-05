@@ -4,7 +4,6 @@ import type {
   BrokerContext,
   OptionOrderLegDraft,
   OrderDraft,
-  OrderSide,
   StrategyOrderLegDraft,
 } from './types.js'
 
@@ -49,7 +48,7 @@ export function estimateOrderNotional(
   }
   if (!hasOptionLegs(draft)) {
     const notional = draft.quantity * estimateReferencePrice(draft, context)
-    if (draft.symbol.assetClass === 'futures') {
+    if (['futures', 'option', 'futures-option'].includes(draft.symbol.assetClass ?? '')) {
       const multiplier = positiveNumber(draft.symbol.contractIdentity?.multiplier)
       return multiplier === undefined ? undefined : notional * multiplier
     }
@@ -73,11 +72,8 @@ export function estimateOrderNotional(
 }
 
 export function strategyOrderQuantity(legs: StrategyOrderLegDraft[]): number {
-  return legs.reduce(
-    (max, leg) =>
-      Math.max(max, leg.instrument === 'equity' ? leg.quantity / leg.ratio : leg.quantity),
-    0,
-  )
+  const first = legs[0]
+  return first ? first.quantity / (first.ratio ?? 1) : 0
 }
 
 function strategyNetUnitPrice(legs: StrategyOrderLegDraft[]): number {
@@ -93,12 +89,8 @@ function strategyNetUnitPrice(legs: StrategyOrderLegDraft[]): number {
   }, 0)
 }
 
-export function strategyOrderNetSide(legs: StrategyOrderLegDraft[]): OrderSide {
-  return strategyNetUnitPrice(legs) >= 0 ? 'buy' : 'sell'
-}
-
 function optionOrderQuantity(optionLegs: OptionOrderLegDraft[]): number {
-  return optionLegs.reduce((max, leg) => Math.max(max, leg.quantity), 0)
+  return strategyOrderQuantity(optionLegs.map((leg) => ({ ...leg, instrument: 'option' })))
 }
 
 export function describeOptionLeg(leg: OptionOrderLegDraft): string {

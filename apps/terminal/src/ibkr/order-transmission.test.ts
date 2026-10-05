@@ -77,7 +77,11 @@ it.each(['working', 'partially-filled', 'filled', 'cancelled', 'expired'])(
     if (!order) throw new Error('Expected the broker order')
     expect(order.status).toBe(status)
     expect(order.message).toBeUndefined()
-    expect(order.metadata).toEqual({ brokerStatus: status, brokerMessage: warning })
+    expect(order.metadata).toEqual({
+      brokerStatus: status,
+      brokerMessage: warning,
+      nativeAssetClass: 'stock',
+    })
   },
 )
 

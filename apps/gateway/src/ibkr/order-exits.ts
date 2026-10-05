@@ -13,6 +13,7 @@ export function exitChildDrafts(draft: OrderDraft): Array<{
       symbol: draft.symbol,
       side,
       duration: draft.duration,
+      routingDestination: draft.routingDestination,
       durationDateTime: draft.durationDateTime,
       quantity: level.quantity,
     }

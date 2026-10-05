@@ -1,3 +1,4 @@
+import { brokerSymbolKey } from './contracts.js'
 import type {
   AccountSummary,
   BridgeDiagnostic,
@@ -57,10 +58,18 @@ export class BrokerStateStore {
     this.patchState({ marketDataConnection: connection })
   }
 
-  setAccounts(accounts: AccountSummary[], activeAccountId?: string): void {
+  setAccounts(accounts: AccountSummary[], activeAccountId?: string | null): void {
     this.patchState({
       accounts,
-      activeAccountId: activeAccountId ?? this.state.activeAccountId ?? accounts[0]?.id,
+      activeAccountId:
+        activeAccountId === null
+          ? undefined
+          : activeAccountId && accounts.some((account) => account.id === activeAccountId)
+            ? activeAccountId
+            : this.state.activeAccountId &&
+                accounts.some((account) => account.id === this.state.activeAccountId)
+              ? this.state.activeAccountId
+              : accounts[0]?.id,
     })
     this.emit({
       type: 'accounts',
@@ -90,7 +99,11 @@ export class BrokerStateStore {
       : this.state.ordersHistory
     this.patchState({ orders, ordersHistory })
     this.emit({ type: 'orders', orders, timestamp: now() })
-    this.emit({ type: 'orders-history', orders: ordersHistory ?? [], timestamp: now() })
+    this.emit({
+      type: 'orders-history',
+      orders: ordersHistory ?? [],
+      timestamp: now(),
+    })
   }
 
   setOrders(orders: Order[]): void {
@@ -102,16 +115,33 @@ export class BrokerStateStore {
     )
     this.patchState({ orders: openOrders, ordersHistory })
     this.emit({ type: 'orders', orders: openOrders, timestamp: now() })
-    this.emit({ type: 'orders-history', orders: ordersHistory, timestamp: now() })
+    this.emit({
+      type: 'orders-history',
+      orders: ordersHistory,
+      timestamp: now(),
+    })
   }
 
   upsertPosition(position: Position): void {
     const existing = this.state.positions.find((item) => item.id === position.id)
     const nextPosition = existing ? { ...existing, ...position } : position
+    if (existing && existing.quantity !== position.quantity) {
+      // Portfolio amounts describe a particular quantity. A position-only callback
+      // must not keep valuations or PnL belonging to the previous size.
+      for (const field of ['marketValue', 'unrealizedPnl', 'realizedPnl'] as const) {
+        if (!Object.hasOwn(position, field)) delete nextPosition[field]
+      }
+    }
     const positions =
       position.quantity === 0
         ? this.state.positions.filter((item) => item.id !== position.id)
         : upsertById(this.state.positions, nextPosition)
+    this.patchState({ positions })
+    this.emit({ type: 'positions', positions, timestamp: now() })
+  }
+
+  reconcilePositions(positionIds: ReadonlySet<string>): void {
+    const positions = this.state.positions.filter((position) => positionIds.has(position.id))
     this.patchState({ positions })
     this.emit({ type: 'positions', positions, timestamp: now() })
   }
@@ -133,6 +163,22 @@ export class BrokerStateStore {
   setMarketDepth(marketDepth: MarketDepth): void {
     this.patchState({ marketDepth })
     this.emit({ type: 'market-depth', marketDepth, timestamp: now() })
+  }
+
+  invalidatePortfolio(accountId: string): void {
+    const positions = this.state.positions.map((position) => {
+      if (position.accountId !== accountId) return position
+      const {
+        markPrice: _markPrice,
+        marketValue: _marketValue,
+        unrealizedPnl: _unrealizedPnl,
+        realizedPnl: _realizedPnl,
+        ...current
+      } = position
+      return current
+    })
+    this.patchState({ positions })
+    this.emit({ type: 'positions', positions, timestamp: now() })
   }
 
   upsertQuote(quote: MarketQuote): void {
@@ -160,7 +206,9 @@ export class BrokerStateStore {
       text,
       timestamp: now(),
     }
-    this.patchState({ diagnostics: [...this.state.diagnostics.slice(-199), diagnostic] })
+    this.patchState({
+      diagnostics: [...this.state.diagnostics.slice(-199), diagnostic],
+    })
     this.emit({ type: 'diagnostic', diagnostic, timestamp: now() })
     return diagnostic
   }
@@ -209,11 +257,20 @@ function upsertExecutionByIdentity(items: Execution[], execution: Execution): Ex
     return items
   }
   const next = [...items]
-  next[index] = execution
+  const previousTimestamp = items[index]?.timestamp
+  next[index] =
+    !Number.isFinite(Date.parse(execution.timestamp)) &&
+    previousTimestamp !== undefined &&
+    Number.isFinite(Date.parse(previousTimestamp))
+      ? { ...execution, timestamp: previousTimestamp }
+      : execution
   return next
 }
 
-function executionRevision(id: string): { identity: string; revision?: number | undefined } {
+function executionRevision(id: string): {
+  identity: string
+  revision?: number | undefined
+} {
   const match = /^(.*)\.(\d+)$/.exec(id)
   if (!match) return { identity: id }
   return { identity: match[1] ?? id, revision: Number(match[2]) }
@@ -238,10 +295,5 @@ function upsertByQuoteKey(items: MarketQuote[], item: MarketQuote): MarketQuote[
 }
 
 function quoteKey(quote: MarketQuote): string {
-  return [
-    quote.symbol.assetClass ?? 'stock',
-    quote.symbol.symbol,
-    quote.symbol.exchange ?? '',
-    quote.symbol.currency ?? '',
-  ].join(':')
+  return brokerSymbolKey(quote.symbol)
 }

@@ -45,6 +45,8 @@ function fixture(mode: 'paper' | 'live' = 'paper') {
     cancelOrder: vi.fn(),
     reqIds: vi.fn(),
     reqOpenOrders: vi.fn(),
+    reqAllOpenOrders: vi.fn(),
+    reqContractDetails: vi.fn(),
   })
   const service = new IbkrService(
     createBridgeConfig(
@@ -57,6 +59,17 @@ function fixture(mode: 'paper' | 'live' = 'paper') {
     store,
     ib as unknown as IBApi,
   )
+  vi.spyOn(service['requests'], 'requestContractDetails').mockImplementation(async (contract) => [
+    {
+      contract: { ...contract, conId: contract.conId ?? 265598 },
+      priceMagnifier: 1,
+      validExchanges: contract.exchange,
+      marketRuleIds: '26',
+    },
+  ])
+  vi.spyOn(service['requests'], 'requestMarketRule').mockResolvedValue([
+    { lowEdge: 0, increment: 0.01 },
+  ])
   ib.emit(EventName.nextValidId, 100)
   return { service, ib, store }
 }
@@ -83,11 +96,18 @@ it.each(['market', 'large-limit'] as const)(
   },
 )
 
-it('keeps explicit live mutation authorization after removing the notional gate', () => {
+it('allows manual cancellation of a bound order independently of legacy live trading flags', () => {
   const { service, ib, store } = fixture('live')
   store.setAccounts([{ id: 'DU123', label: 'Test', currency: 'USD' }])
-  expect(() => service.cancelOrder('123')).toThrow('This connection is read-only')
-  expect(ib.cancelOrder).not.toHaveBeenCalled()
+  store.upsertOrder({
+    ...draft,
+    id: '123',
+    brokerOrderId: 123,
+    status: 'working',
+    submittedAt: new Date().toISOString(),
+  })
+  service.cancelOrder('123')
+  expect(ib.cancelOrder).toHaveBeenCalledWith(123)
 })
 
 it('waits for broker cancellation and clears the earlier warning only on the final event', () => {
@@ -669,8 +689,188 @@ it('keeps a pending order visible when IBKR cannot complete its cancellation', (
   ib.emit(EventName.error, new Error('Cannot be cancelled, state: PendingCancel.'), 10148, 123)
   expect(store.getState().orders[0]).toMatchObject({ id: '123', status: 'placing' })
   expect(store.getState().ordersHistory).toEqual([])
-  expect(ib.reqOpenOrders).toHaveBeenCalled()
+  expect(ib.reqAllOpenOrders).toHaveBeenCalled()
   ib.emit(EventName.orderStatus, 123, 'Cancelled', 0, 1, 0)
   expect(store.getState().orders).toEqual([])
   expect(store.getState().ordersHistory?.[0]?.status).toBe('cancelled')
+})
+
+it.each(['modify', 'preview'] as const)(
+  'checks the owning account before a %s preview or submission',
+  async (operation) => {
+    const { service, ib, store } = fixture()
+    store.upsertOrder({
+      ...draft,
+      accountId: 'DU999',
+      id: '555',
+      brokerOrderId: 555,
+      status: 'working',
+      submittedAt: '2026-09-30T12:00:00Z',
+      updatedAt: '2026-09-30T12:00:00Z',
+    })
+    const result =
+      operation === 'modify'
+        ? service.modifyOrder('555', { limitPrice: 2 }, { accountId: 'DU123' })
+        : service.previewModifyOrder('555', { limitPrice: 2 }, { accountId: 'DU123' })
+    const rejected = expect(result).rejects.toThrow('not authorized')
+    await vi.advanceTimersByTimeAsync(8000)
+    await rejected
+    expect(ib.placeOrder).not.toHaveBeenCalled()
+  },
+)
+
+it.each([
+  { context: { accountId: 'DU999' }, patch: { limitPrice: 2 } },
+  { context: {}, patch: { accountId: 'DU999', limitPrice: 2 } },
+  { context: {}, patch: { symbol: { ...draft.symbol, symbol: 'MSFT' }, limitPrice: 2 } },
+  { context: {}, patch: { id: '777', limitPrice: 2 } },
+  { context: {}, patch: { brokerOrderId: 777, limitPrice: 2 } },
+])('rejects changes to order ownership or identity before what-if', async ({ context, patch }) => {
+  const { service, ib, store } = fixture()
+  store.upsertOrder({
+    ...draft,
+    id: '555',
+    brokerOrderId: 555,
+    status: 'working',
+    submittedAt: '2026-09-30T12:00:00Z',
+    updatedAt: '2026-09-30T12:00:00Z',
+  })
+  const result = service.modifyOrder('555', patch, context)
+  const rejected = expect(result).rejects.toThrow(/owning account|identity/)
+  await vi.advanceTimersByTimeAsync(8000)
+  await rejected
+  expect(ib.placeOrder).not.toHaveBeenCalled()
+})
+
+it.each(['filled', 'cancelled', 'partially-filled'] as const)(
+  'does not submit a stale modification after the order becomes %s during preview',
+  async (status) => {
+    const { service, ib, store } = fixture()
+    const original = {
+      ...draft,
+      id: '555',
+      brokerOrderId: 555,
+      quantity: 2,
+      status: 'working' as const,
+      filledQuantity: 0,
+      remainingQuantity: 2,
+      submittedAt: '2026-09-30T12:00:00Z',
+      updatedAt: '2026-09-30T12:00:00Z',
+    }
+    store.upsertOrder(original)
+    const result = service.modifyOrder('555', { limitPrice: 2 })
+    const rejected = expect(result).rejects.toThrow(
+      'changed while the modification was being prepared',
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    const latest = {
+      ...original,
+      status,
+      filledQuantity: status === 'filled' ? 2 : 1,
+      remainingQuantity: status === 'filled' ? 0 : 1,
+      updatedAt: '2026-09-30T12:00:01Z',
+    }
+    store.upsertOrder(latest)
+    ib.emit(EventName.openOrder, 100, {}, { whatIf: true }, { commission: 1 })
+    await rejected
+    expect(ib.placeOrder).toHaveBeenCalledTimes(1)
+    expect(
+      [...store.getState().orders, ...store.getState().ordersHistory!].find(
+        (order) => order.id === '555',
+      ),
+    ).toEqual(latest)
+  },
+)
+
+it.each([110, 163, 321])('keeps the original order after modification refusal %s', async (code) => {
+  const { service, ib, store } = fixture()
+  const original = {
+    ...draft,
+    id: '555',
+    brokerOrderId: 555,
+    status: 'working' as const,
+    submittedAt: '2026-09-30T12:00:00Z',
+    updatedAt: '2026-09-30T12:00:00Z',
+  }
+  store.upsertOrder(original)
+  vi.spyOn(service['orders'], 'previewOrder').mockResolvedValue({ accepted: true })
+  await service.modifyOrder('555', { limitPrice: 2 })
+  ib.emit(EventName.error, new Error('Modification refused'), code, 555)
+  expect(store.getState().orders[0]).toMatchObject({ status: 'working', limitPrice: 1 })
+  expect(store.getState().ordersHistory).toEqual([])
+  expect(ib.reqAllOpenOrders).toHaveBeenCalledOnce()
+  expect(ib.reqOpenOrders).not.toHaveBeenCalled()
+})
+
+it.each([161, 10147, 10149, 2102, 2110, 9999])(
+  'does not reject an acknowledged order on code %s',
+  (code) => {
+    const { ib, store } = fixture()
+    store.upsertOrder({
+      ...draft,
+      id: '555',
+      brokerOrderId: 555,
+      status: 'working',
+      submittedAt: '2026-09-30T12:00:00Z',
+      updatedAt: '2026-09-30T12:00:00Z',
+    })
+    ib.emit(EventName.error, new Error('Order request not completed'), code, 555)
+    expect(store.getState().orders[0]?.status).toBe('working')
+    expect(store.getState().ordersHistory).toEqual([])
+  },
+)
+
+it('never downgrades a fill when a delayed modification refusal arrives', async () => {
+  const { service, ib, store } = fixture()
+  const original = {
+    ...draft,
+    id: '555',
+    brokerOrderId: 555,
+    status: 'working' as const,
+    submittedAt: '2026-09-30T12:00:00Z',
+    updatedAt: '2026-09-30T12:00:00Z',
+  }
+  store.upsertOrder(original)
+  vi.spyOn(service['orders'], 'previewOrder').mockResolvedValue({ accepted: true })
+  await service.modifyOrder('555', { limitPrice: 2 })
+  ib.emit(EventName.orderStatus, 555, 'Filled', 1, 0, 1)
+  ib.emit(EventName.error, new Error('Already filled'), 105, 555)
+  expect(store.getState().orders).toEqual([])
+  expect(store.getState().ordersHistory?.[0]).toMatchObject({ status: 'filled', filledQuantity: 1 })
+})
+
+it('does not match a contract-details request error to a colliding broker order id', async () => {
+  const { service, ib, store } = fixture()
+  vi.mocked(service['requests'].requestContractDetails).mockRestore()
+  const result = service['requests'].requestContractDetails({ symbol: 'AAPL', secType: 'STK' })
+  const rejected = expect(result).rejects.toThrow('No security definition')
+  const requestId = ib.reqContractDetails.mock.calls[0]?.[0] as number
+  store.upsertOrder({
+    ...draft,
+    id: String(requestId),
+    brokerOrderId: requestId,
+    status: 'working',
+    submittedAt: '2026-09-30T12:00:00Z',
+    updatedAt: '2026-09-30T12:00:00Z',
+  })
+  ib.emit(EventName.error, new Error('No security definition'), 200, requestId)
+  await rejected
+  expect(store.getState().orders[0]?.status).toBe('working')
+  expect(store.getState().ordersHistory).toEqual([])
+})
+
+it('previews every bracket price on the same selected route as its executable contract', async () => {
+  const { service, ib } = fixture()
+  const result = service.previewOrder({ ...bracketDraft, routingDestination: 'ARCA' })
+  await vi.advanceTimersByTimeAsync(0)
+  ib.emit(EventName.openOrder, 100, {}, { whatIf: true }, { commission: 1 })
+  await vi.advanceTimersByTimeAsync(0)
+  ib.emit(EventName.openOrder, 101, {}, { whatIf: true }, { commission: 1 })
+  ib.emit(EventName.openOrder, 102, {}, { whatIf: true }, { commission: 1 })
+  expect(await result).toMatchObject({ accepted: true })
+  expect(ib.placeOrder).toHaveBeenCalledTimes(3)
+  for (const [, contract, order] of ib.placeOrder.mock.calls) {
+    expect(contract.exchange).toBe('ARCA')
+    expect(order.whatIf).toBe(true)
+  }
 })

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "devUrl": "http://localhost:3000",
+    "beforeDevCommand": {
+      "script": "npm run dev",
+      "cwd": "../.."
+    }
+  },
+  "app": {
+    "security": {
+      "capabilities": [
+        {
+          "identifier": "desktop-development",
+          "description": "Window controls for the root development workstation only.",
+          "windows": ["main"],
+          "local": true,
+          "remote": { "urls": ["http://localhost:3000"] },
+          "permissions": [
+            "core:default",
+            "allow-credentials-page",
+            "core:window:allow-start-dragging",
+            "core:window:allow-minimize",
+            "core:window:allow-toggle-maximize",
+            "core:window:allow-close"
+          ]
+        }
+      ]
+    }
+  }
+}

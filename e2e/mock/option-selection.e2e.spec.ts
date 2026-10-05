@@ -11,7 +11,7 @@ test('selecting an option foregrounds its existing order tab', async ({ page }) 
   await expect(chain.getByText('Calls', { exact: true })).toBeVisible()
   await expect(orderTab).toHaveAttribute('aria-selected', 'false')
 
-  await chain.getByRole('button', { name: '2.4500', exact: true }).first().click()
+  await chain.getByRole('button', { name: '2.4900', exact: true }).first().click()
 
   await expect(orderTab).toHaveAttribute('aria-selected', 'true')
   await expect(page.getByRole('tabpanel', { name: /Options Order/u })).toBeVisible()

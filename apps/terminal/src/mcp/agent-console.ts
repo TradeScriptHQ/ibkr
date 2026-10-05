@@ -7,6 +7,8 @@ import type {
   AgentConsoleGrantRow,
   AgentConsoleSnapshot,
 } from '@tradescript/pro/sdk'
+import { APP_NAME } from '../branding.js'
+import type { AgentRiskAvailability } from '../workstation-agent-risk.js'
 
 export interface McpConsoleState {
   readonly phase: 'connecting' | 'connected' | 'disconnected' | 'error'
@@ -19,6 +21,7 @@ export interface McpConsoleState {
 
 export interface McpAgentConsoleController extends AgentConsoleControllerApi {
   publishMcp(state: McpConsoleState): void
+  publishAgentRisk(state: AgentRiskAvailability): void
   destroy(): void
 }
 
@@ -34,8 +37,16 @@ function grantRows(state: McpConsoleState): readonly AgentConsoleGrantRow[] {
 function snapshotFor(
   state: McpConsoleState,
   executionEnvironment: ExecutionEnvironment,
-  agentTradingEnabled: boolean,
+  agentRisk: AgentRiskAvailability,
 ): Omit<AgentConsoleSnapshot, 'revision'> {
+  const agentTradingEnabled = agentRisk.state === 'ready'
+  const agentTradingHint = agentTradingEnabled
+    ? `${executionEnvironment} agent trading enabled`
+    : agentRisk.state === 'unavailable'
+      ? `Agent trading paused: ${agentRisk.message}`
+      : agentRisk.state === 'checking'
+        ? 'Checking agent trading safety. Agent orders are blocked.'
+        : 'Agent trading is turned off.'
   const connected = state.phase === 'connected'
   const connectionStatus =
     state.phase === 'error'
@@ -57,7 +68,7 @@ function snapshotFor(
               ? 'Local MCP unavailable'
               : 'Local MCP disconnected',
       hops: [
-        { id: 'terminal', label: 'TradeScript terminal', status: 'ready' },
+        { id: 'terminal', label: APP_NAME, status: 'ready' },
         {
           id: 'bridge',
           label: 'Loopback bridge',
@@ -80,9 +91,7 @@ function snapshotFor(
       paperTrading: {
         enabled: agentTradingEnabled,
         available: false,
-        hint: agentTradingEnabled
-          ? `${executionEnvironment} agent trading enabled`
-          : 'Agent trading is disabled in Connection settings',
+        hint: agentTradingHint,
       },
     },
     pairing: {
@@ -101,7 +110,7 @@ function snapshotFor(
         ? { status: connected ? 'loading' : 'idle' }
         : {
             status: 'ready',
-            summaryLabel: `${state.controlCount} controls · ${state.surfaces?.length ?? 0} surfaces · ${agentTradingEnabled ? `${executionEnvironment} agent trading` : `${executionEnvironment} · agent trading disabled`}`,
+            summaryLabel: `${state.controlCount} controls · ${state.surfaces?.length ?? 0} surfaces · ${agentTradingEnabled ? `${executionEnvironment} agent trading` : `${executionEnvironment} · agent trading ${agentRisk.state === 'unavailable' ? 'paused' : agentRisk.state === 'checking' ? 'checking' : 'disabled'}`}`,
           },
     ...(state.phase === 'error'
       ? {
@@ -116,15 +125,15 @@ function snapshotFor(
 }
 
 export function createMcpAgentConsoleController(
-  executionEnvironment: ExecutionEnvironment = 'paper',
-  agentTradingEnabled = executionEnvironment === 'paper',
+  executionEnvironment: ExecutionEnvironment,
+  agentRisk: AgentRiskAvailability,
 ): McpAgentConsoleController {
   let state: McpConsoleState = {
     phase: 'connecting',
     endpoint: 'the local MCP endpoint',
   }
   let snapshot: AgentConsoleSnapshot = {
-    ...snapshotFor(state, executionEnvironment, agentTradingEnabled),
+    ...snapshotFor(state, executionEnvironment, agentRisk),
     revision: 0,
   }
   const listeners = new Set<(event: AgentConsoleControllerEvent) => void>()
@@ -132,20 +141,20 @@ export function createMcpAgentConsoleController(
     async copyPairingPrompt() {
       const session = state.sessionId === undefined ? '' : `\nSession: ${state.sessionId}`
       await navigator.clipboard.writeText(
-        `Connect to the TradeScript MCP endpoint at ${state.endpoint}.${session}\nRead tradescript://sessions and discover exact controls.${agentTradingEnabled ? ` Trading is enabled on the selected ${executionEnvironment} connection.` : ' Agent trading is disabled for this connection.'}`,
+        `Connect to the TradeScript MCP endpoint at ${state.endpoint}.${session}\nRead tradescript://sessions and discover exact controls.${agentRisk.state === 'ready' ? ` Trading is enabled on the selected ${executionEnvironment} connection.` : agentRisk.state === 'unavailable' ? ` Agent orders are blocked: ${agentRisk.message}` : agentRisk.state === 'checking' ? ' Agent orders are blocked while safety checks complete.' : ' Agent trading is disabled for this connection.'}`,
       )
     },
     async copyPrompt(promptId) {
       if (promptId !== 'inspect') return
       await navigator.clipboard.writeText(
-        `Inspect the attached TradeScript terminal session ${state.sessionId ?? ''}. Read its context and list available controls before making changes.`,
+        `Inspect the attached ${APP_NAME} session ${state.sessionId ?? ''}. Read its context and list available controls before making changes.`,
       )
     },
   }
 
   function publish(reason: AgentConsoleControllerChangeReason): void {
     snapshot = {
-      ...snapshotFor(state, executionEnvironment, agentTradingEnabled),
+      ...snapshotFor(state, executionEnvironment, agentRisk),
       revision: snapshot.revision + 1,
     }
     const event: AgentConsoleControllerEvent = { reason, revision: snapshot.revision, snapshot }
@@ -167,6 +176,10 @@ export function createMcpAgentConsoleController(
       publish(
         next.phase === 'connected' ? 'connection' : next.phase === 'error' ? 'connection' : 'host',
       )
+    },
+    publishAgentRisk(next) {
+      agentRisk = next
+      publish('host')
     },
     destroy() {
       listeners.clear()

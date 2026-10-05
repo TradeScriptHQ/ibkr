@@ -1,6 +1,7 @@
-import type { Contract } from '@stoqey/ib'
+import type { Contract, ContractDetails } from '@stoqey/ib'
 import { denormalizeOptionExpiry } from './contracts.js'
 import { positiveContractId, positiveInteger, positiveNumber } from './numbers.js'
+import { RequestError } from './request-error.js'
 import type { BrokerSymbol, OptionChainContract, OptionContract } from './types.js'
 
 export interface IbSecDefOptionParameters {
@@ -17,18 +18,95 @@ export type ResolvedOptionQuoteContract = Contract & {
   priceIncrements?: Array<{ lowEdge: number; increment: number }> | undefined
 }
 
+/** Neither a tuple nor a caller-supplied conId authorizes choosing an arbitrary class. */
+export function selectExactOptionDetails(
+  details: ContractDetails[],
+  query: Contract,
+): Omit<ContractDetails, 'contract'> & { contract: Contract & { conId: number } } {
+  const requestedId = positiveContractId(query.conId)
+  const unique = new Map<number, ContractDetails>()
+  for (const item of details) {
+    const id = positiveContractId(item.contract?.conId)
+    if (id === undefined || (requestedId !== undefined && id !== requestedId)) continue
+    unique.set(id, item)
+  }
+  if (unique.size === 0) throw new RequestError(404, 'IBKR option contract was not found.')
+  if (unique.size !== 1)
+    throw new RequestError(
+      409,
+      'Select one exact IBKR option contract; the option tuple is ambiguous.',
+    )
+  const entry = unique.entries().next().value
+  if (!entry) throw new RequestError(404, 'IBKR option contract was not found.')
+  const [conId, match] = entry
+  assertOptionIdentity(query, match.contract)
+  return { ...match, contract: { ...match.contract, conId } }
+}
+
+export function assertOptionIdentity(query: Contract, actual: Contract): void {
+  const sameExpiry =
+    denormalizeOptionExpiry(
+      String(actual.lastTradeDateOrContractMonth ?? actual.lastTradeDate ?? ''),
+    ) ===
+    denormalizeOptionExpiry(String(query.lastTradeDateOrContractMonth ?? query.lastTradeDate ?? ''))
+  const right = (value: unknown) =>
+    String(value ?? '')
+      .toUpperCase()
+      .replace('CALL', 'C')
+      .replace('PUT', 'P')
+  if (
+    actual.secType !== query.secType ||
+    actual.symbol?.toUpperCase() !== query.symbol?.toUpperCase() ||
+    !sameExpiry ||
+    Number(actual.strike) !== Number(query.strike) ||
+    right(actual.right) !== right(query.right) ||
+    actual.currency !== query.currency ||
+    !(Number(actual.multiplier) > 0) ||
+    Number(actual.multiplier) !== Number(query.multiplier) ||
+    (query.tradingClass !== undefined && query.tradingClass !== actual.tradingClass)
+  )
+    throw new RequestError(
+      404,
+      'The qualified IBKR contract does not match the requested option identity.',
+    )
+}
+
 export function selectOptionParameters(
   parameters: IbSecDefOptionParameters[],
   requestedExchange: string,
+  tradingClass?: string,
 ): IbSecDefOptionParameters | undefined {
-  const usable = parameters.filter((item) => item.expirations.length > 0 && item.strikes.length > 0)
-  if (requestedExchange) {
-    const exact = usable.find((item) => item.exchange === requestedExchange)
-    if (exact) return exact
-  }
-  const smart = usable.find((item) => item.exchange === 'SMART')
-  if (smart) return smart
-  return usable[0]
+  const usable = parameters.filter(
+    (item) =>
+      item.expirations.length > 0 &&
+      item.strikes.length > 0 &&
+      (tradingClass === undefined || item.tradingClass === tradingClass),
+  )
+  const preferredExchange =
+    requestedExchange && usable.some((item) => item.exchange === requestedExchange)
+      ? requestedExchange
+      : usable.some((item) => item.exchange === 'SMART')
+        ? 'SMART'
+        : undefined
+  const preferred = preferredExchange
+    ? usable.filter((item) => item.exchange === preferredExchange)
+    : usable
+  const classes = new Set(
+    preferred.map((item) => `${item.underlyingConId}|${item.tradingClass}|${item.multiplier}`),
+  )
+  if (classes.size > 1)
+    throw new RequestError(
+      409,
+      'Option chain unavailable: multiple IBKR trading classes require an explicit class selector.',
+    )
+  const selected = preferred[0]
+  return selected
+    ? {
+        ...selected,
+        expirations: [...new Set(preferred.flatMap((item) => item.expirations))],
+        strikes: [...new Set(preferred.flatMap((item) => item.strikes))],
+      }
+    : undefined
 }
 
 export function toOptionChainContract(
@@ -74,6 +152,7 @@ export function toOptionChainContract(
       route: context.route,
       currency: contract?.currency ?? context.currency,
       symbol: contract?.localSymbol ?? contract?.tradingClass,
+      tradingClass: contract?.tradingClass,
       brokerContractId,
       priceStep: positiveNumber(contract?.priceStep),
       priceIncrements: contract?.priceIncrements,
@@ -144,6 +223,8 @@ export function optionContractQuoteKey(contract: OptionContract): string {
     contract.currency ?? 'USD',
     contract.exchange ?? '',
     contract.route ?? '',
+    contract.brokerContractId ?? '',
+    contract.multiplier,
   ].join('|')
 }
 
@@ -170,6 +251,7 @@ export function toResolvedOptionContract(
     route: source.route ?? contract.exchange,
     currency: contract.currency ?? source.currency,
     symbol: contract.localSymbol ?? source.symbol,
+    tradingClass: contract.tradingClass ?? source.tradingClass,
     brokerContractId: contract.conId ?? source.brokerContractId,
     priceStep: positiveNumber(contract.priceStep) ?? positiveNumber(source.priceStep),
     priceIncrements: contract.priceIncrements ?? source.priceIncrements,

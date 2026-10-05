@@ -1,17 +1,25 @@
 import type { SdkMarketDepth, SdkSymbolInfo, TradeScriptAdapterApi } from '@tradescript/pro/sdk'
 
 export function depthStatusMessage(symbol: SdkSymbolInfo, depth?: SdkMarketDepth): string {
+  const diagnostic = depth?.diagnostic
+  const pending =
+    diagnostic?.code == null && diagnostic?.reason?.startsWith('Gateway depth pending:')
+  const noResponse =
+    diagnostic?.code == null && diagnostic?.reason?.startsWith('Gateway depth no response:')
   if (depth?.metadata?.depthSource === 'top-of-book') {
     const status = depth.metadata.quoteStatus
     const timing = status === 'delayed' ? ' · Delayed quotes' : ''
-    return `Best bid/ask only · Level II unavailable${timing}`
+    const coverage = pending
+      ? 'Waiting for Level II'
+      : noResponse
+        ? 'Level II has not responded'
+        : 'Level II unavailable'
+    return `Best bid/ask only · ${coverage}${timing}`
   }
-  const diagnostic = depth?.metadata?.depthDiagnostic as
-    | { message?: string | undefined; code?: number | undefined }
-    | undefined
-  if (diagnostic?.message) {
-    return `${symbol.ticker} market depth unavailable.\nIBKR${diagnostic.code == null ? '' : ` ${diagnostic.code}`}: ${diagnostic.message}`
-  }
+  if (pending) return `Waiting for ${symbol.ticker} market depth from IBKR.`
+  if (noResponse) return `${symbol.ticker} market depth has not responded. Availability is unknown.`
+  if (diagnostic?.reason)
+    return `${symbol.ticker} market depth unavailable.\n${diagnostic.provider ?? 'IBKR'}${diagnostic.code == null ? '' : ` ${diagnostic.code}`}: ${diagnostic.reason}`
   return `Waiting for ${symbol.ticker} market depth from IBKR.`
 }
 

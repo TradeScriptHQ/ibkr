@@ -44,18 +44,29 @@ export function queryFor(symbol: SymbolInfo) {
     assetClass: symbol.type ?? '',
   })
 }
-export async function select(page: Page, root: string, assetLabel: string, symbol: MarketSymbol) {
-  await page.goto('/')
+export async function select(
+  page: Page,
+  root: string,
+  assetLabel: string,
+  symbol: MarketSymbol,
+  options: { navigate?: boolean; chooseExchange?: boolean } = {},
+) {
+  if (options.navigate !== false) await page.goto('/')
   await page.getByRole('button', { name: /^Change symbol / }).click({ timeout: 60_000 })
   await page.getByRole('button', { name: assetLabel, exact: true }).click()
   if (!symbol.exchange) throw new Error('Missing contract venue')
-  await page.getByRole('button', { name: symbol.exchange, exact: true }).click()
+  if (options.chooseExchange !== false)
+    await page.getByRole('button', { name: symbol.exchange, exact: true }).click()
   await page.getByPlaceholder('Symbol', { exact: true }).fill(root)
-  await page
+  const rows = page
     .getByRole('listitem')
     .filter({ has: page.getByText(symbol.ticker, { exact: true }) })
-    .filter({ hasText: symbol.exchange })
-    .click()
+    .filter({ hasText: symbol.primaryExchange ?? symbol.exchange })
+  const listing =
+    options.chooseExchange === false && symbol.currency
+      ? rows.filter({ hasText: symbol.currency })
+      : rows
+  await listing.click()
   await expect(page.getByRole('button', { name: /^Change symbol / })).toContainText(
     symbol.name ?? symbol.ticker,
   )
@@ -68,4 +79,34 @@ export async function select(page: Page, root: string, assetLabel: string, symbo
       ),
     )
     .toBe(symbol.canonicalSymbol)
+}
+
+export async function resolveUsStock(request: APIRequestContext, ticker: 'AAPL' | 'MSFT') {
+  const symbol = await expectJsonOk<MarketSymbol>(
+    await request.get(
+      `/api/v1/ibkr/symbols/resolve?${new URLSearchParams({
+        symbol: ticker,
+        assetClass: 'stock',
+        exchange: 'SMART',
+        primaryExchange: 'NASDAQ',
+        currency: 'USD',
+      })}`,
+      { headers: browserHeaders },
+    ),
+  )
+  const conId = Number(/^IBKR:([1-9][0-9]*)$/u.exec(symbol.canonicalSymbol ?? '')?.[1])
+  if (
+    symbol.ticker !== ticker ||
+    symbol.type !== 'stock' ||
+    symbol.exchange !== 'SMART' ||
+    symbol.currency !== 'USD' ||
+    symbol.primaryExchange !== 'NASDAQ' ||
+    !Number.isSafeInteger(conId) ||
+    conId <= 0 ||
+    (symbol.contractIdentity?.conId !== undefined && symbol.contractIdentity.conId !== conId) ||
+    (symbol.contractIdentity?.securityType !== undefined &&
+      symbol.contractIdentity.securityType !== 'STK')
+  )
+    throw new Error('TWS omitted the exact requested US stock identity')
+  return symbol
 }

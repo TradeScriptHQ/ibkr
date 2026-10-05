@@ -6,6 +6,63 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+it('refreshes the exact active quote identity every 15 seconds and stops after unsubscribe', async () => {
+  vi.useFakeTimers()
+  class TestEventSource extends EventTarget {
+    close = vi.fn()
+  }
+  vi.stubGlobal('EventSource', TestEventSource)
+  const fetchMock = vi.fn(async (_input: RequestInfo | URL) =>
+    Response.json([
+      {
+        symbol: {
+          symbol: 'AAPL',
+          exchange: 'SMART',
+          primaryExchange: 'NASDAQ',
+          currency: 'USD',
+          assetClass: 'stock',
+        },
+        status: 'delayed',
+        bid: 100,
+        timestamp: '2026-09-30T09:00:00Z',
+      },
+    ]),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const feed = createIbkrMarketDatafeed({ baseUrl: 'http://localhost/api' })
+  const callback = vi.fn()
+  const identity = {
+    ticker: 'AAPL',
+    brokerSymbol: 'AAPL',
+    exchange: 'SMART',
+    listedExchange: 'NASDAQ',
+    currency: 'USD',
+    type: 'stock' as const,
+  }
+  if (!feed.subscribeQuotes) throw new Error('Quote subscription required')
+  const stop = feed.subscribeQuotes({ id: 'exact-active', symbols: [identity] }, callback)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  await vi.advanceTimersByTimeAsync(15_000)
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(callback.mock.lastCall?.[0]?.[0].symbol).toEqual(identity)
+  for (const call of fetchMock.mock.calls) {
+    const request = new URL(String(call[0]))
+    expect(Object.fromEntries(request.searchParams)).toMatchObject({
+      symbol: 'AAPL',
+      exchange: 'SMART',
+      primaryExchange: 'NASDAQ',
+      currency: 'USD',
+      assetClass: 'stock',
+    })
+  }
+  stop()
+  const published = callback.mock.calls.length
+  await vi.advanceTimersByTimeAsync(60_000)
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(callback).toHaveBeenCalledTimes(published)
+})
+
 it('declares the required SMART venue for spot-metal discovery', async () => {
   const search = (await createIbkrMarketDatafeed().onReady?.())?.symbolSearch
   expect(search?.assetTypes?.find((option) => option.value === 'commodity')).toEqual({
@@ -355,7 +412,13 @@ it('develops the current chart bar from the same live last trade as the order ti
       if (url.includes('/quotes?')) {
         return Response.json([
           {
-            symbol: { symbol: 'FTFT', exchange: 'SMART', currency: 'USD', assetClass: 'stock' },
+            symbol: {
+              symbol: 'FTFT',
+              exchange: 'SMART',
+              primaryExchange: 'NASDAQ',
+              currency: 'USD',
+              assetClass: 'stock',
+            },
             last: 7.1807,
             timestamp: '2026-09-14T20:28:25Z',
             status: 'ok',
@@ -424,6 +487,7 @@ it('develops the current chart bar from the same live last trade as the order ti
               symbol: {
                 symbol: 'FTFT',
                 exchange: 'SMART',
+                primaryExchange: 'NASDAQ',
                 currency: 'USD',
                 assetClass: 'stock',
               },
@@ -448,6 +512,7 @@ it('develops the current chart bar from the same live last trade as the order ti
               symbol: {
                 symbol: 'FTFT',
                 exchange: 'SMART',
+                primaryExchange: 'NASDAQ',
                 currency: 'USD',
                 assetClass: 'stock',
               },
@@ -471,6 +536,7 @@ it('develops the current chart bar from the same live last trade as the order ti
               symbol: {
                 symbol: 'FTFT',
                 exchange: 'SMART',
+                primaryExchange: 'NASDAQ',
                 currency: 'USD',
                 assetClass: 'stock',
               },
@@ -495,6 +561,7 @@ it('develops the current chart bar from the same live last trade as the order ti
               symbol: {
                 symbol: 'FTFT',
                 exchange: 'SMART',
+                primaryExchange: 'NASDAQ',
                 currency: 'USD',
                 assetClass: 'stock',
               },
@@ -508,6 +575,7 @@ it('develops the current chart bar from the same live last trade as the order ti
       }),
     )
     expect(callback).toHaveBeenCalledTimes(callCount)
+    vi.setSystemTime('2026-09-14T20:29:05Z')
     await vi.advanceTimersByTimeAsync(2_500)
     expect(callback.mock.lastCall?.[0]).toMatchObject({
       time: Date.parse('2026-09-14T20:29:00Z'),
@@ -642,7 +710,7 @@ it('uses provider option tick times for freshness and never substitutes mark for
   expect(series?.quote_freshness).toEqual({
     last_update: Date.parse('2026-09-13T10:00:04Z'),
     age_ms: 6000,
-    status: 'current',
+    status: 'frozen',
   })
   expect(series?.contracts[0]?.last_price).toBeUndefined()
   expect(series?.contracts[0]?.theoretical_price).toBe(1.25)
@@ -781,6 +849,42 @@ it.each([undefined, '', '   ', 'Requested API market data requires a subscriptio
     expect(quote?.diagnostic).toEqual(
       reason?.trim() ? { provider: 'IBKR', reason: reason.trim(), code: 10089 } : undefined,
     )
+  },
+)
+
+it.each(['No market data during competing live session', undefined])(
+  'explains an explicit competing-session code without inventing prices: %s',
+  async (reason) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json([
+          {
+            symbol: { symbol: 'AAPL', exchange: 'SMART', currency: 'USD', assetClass: 'stock' },
+            status: 'unavailable',
+            timestamp: '2026-09-09T08:00:00Z',
+            unavailableReason: reason,
+            ibkrErrorCode: 10197,
+          },
+        ]),
+      ),
+    )
+    const feed = createIbkrMarketDatafeed({ baseUrl: 'http://localhost/api' })
+    if (!feed.getQuotes) throw new Error('Quote reads are required')
+    const quote = (await feed.getQuotes({ symbols: ['AAPL'] }))[0]
+    expect(quote?.status).toBe('unavailable')
+    expect(quote?.last).toBeUndefined()
+    expect(quote?.bid).toBeUndefined()
+    expect(quote?.ask).toBeUndefined()
+    expect(quote?.diagnostic).toEqual({
+      provider: 'IBKR',
+      code: 10197,
+      ...(reason ? { reason } : {}),
+      summary: 'Another IBKR session is using live market data.',
+      recoveryGuidance:
+        'Close the other active IBKR trading session, then reconnect here. Paper and live sessions can share market-data access.',
+    })
+    expect(quote?.metadata?.ibkrErrorCode).toBe(10197)
   },
 )
 

@@ -148,9 +148,10 @@ export function supportsIbkrIceberg(
   return symbol.type === 'stock' && symbol.currency?.toUpperCase() === 'USD' && exchange === 'SMART'
 }
 
-export function brokerSessionPath(symbol: SymbolInfo): string {
+export function brokerSessionPath(symbol: SymbolInfo, routingDestination?: string): string {
   const params = new URLSearchParams({ symbol: symbol.brokerSymbol ?? symbol.ticker })
-  if (symbol.exchange) params.set('exchange', symbol.exchange)
+  const route = routingDestination ?? symbol.exchange
+  if (route) params.set('exchange', route)
   if (symbol.listedExchange) params.set('primaryExchange', symbol.listedExchange)
   if (symbol.currency) params.set('currency', symbol.currency)
   if (symbol.type) params.set('assetClass', symbol.type)

@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
+    "dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "build": "tauri build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run && node --test ../../scripts/desktop/update-manifest.test.mjs ../../scripts/desktop/fetch-doppler-secrets.test.mjs",
+    "test": "vitest run && node --test ../../scripts/desktop/update-manifest.test.mjs ../../scripts/desktop/fetch-doppler-secrets.test.mjs ../../scripts/desktop/sign-release.test.mjs ../../scripts/desktop/installer-identity.test.mjs",
     "bundle:runtime": "node ../../scripts/desktop/prepare.mjs"
   },
   "dependencies": {

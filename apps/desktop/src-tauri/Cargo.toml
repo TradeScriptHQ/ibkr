@@ -1,7 +1,7 @@
 [package]
 name = "tradescript-terminal"
 version = "0.1.0"
-description = "TradeScript IBKR workstation"
+description = "IBKR Tradescript Terminal desktop workstation"
 edition = "2021"
 
 [build-dependencies]

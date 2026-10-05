@@ -1,3 +1,4 @@
+import type { ContractPipDefinition } from '@ibkr-terminal/contracts'
 import type { GatewayConfig } from '../config.js'
 
 export interface BridgeConfig {
@@ -10,6 +11,7 @@ export interface BridgeConfig {
   readonly liveOrdersEnabled: boolean
   readonly tradingEnabled?: boolean
   readonly allowedAccountIds: readonly string[]
+  readonly contractPipDefinitions?: readonly ContractPipDefinition[]
 }
 
 export function createBridgeConfig(config: GatewayConfig): BridgeConfig {
@@ -25,5 +27,8 @@ export function createBridgeConfig(config: GatewayConfig): BridgeConfig {
       ? {}
       : { tradingEnabled: config.ibkr.tradingEnabled }),
     allowedAccountIds: config.ibkr.allowedAccountIds,
+    ...(config.ibkr.contractPipDefinitions
+      ? { contractPipDefinitions: config.ibkr.contractPipDefinitions }
+      : {}),
   }
 }

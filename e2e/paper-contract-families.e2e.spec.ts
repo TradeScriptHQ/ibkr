@@ -5,12 +5,11 @@ import type {
   MarketQuote,
   MarketSessionInfo,
   OrderDraft,
-  OrderPreviewResult,
-  PlaceOrderResult,
 } from '@ibkr-terminal/contracts'
 import type { APIRequestContext } from '@playwright/test'
 import { expect, test } from './support/fixtures.js'
 import { discover as discoverNative, select } from './support/instrument-contracts.js'
+import { placeFamilyOrder as place } from './support/paper-family-orders.js'
 import {
   accepted,
   positionQuantities,
@@ -93,28 +92,6 @@ async function discover(
   )
   expect(rows.length, `No ${family.name} contracts returned by TWS`).toBeGreaterThan(0)
   return rows
-}
-async function place(
-  request: APIRequestContext,
-  session: TerminalSession,
-  draft: OrderDraft,
-): Promise<string> {
-  const body = { draft, expectedExecutionEnvironment: 'paper' }
-  const preview = await expectJsonOk<OrderPreviewResult>(
-    await request.post('/api/v1/ibkr/orders/preview', {
-      headers: session.mutationHeaders,
-      data: body,
-    }),
-  )
-  expect(preview.accepted, preview.reason).toBe(true)
-  const result = await expectJsonOk<PlaceOrderResult>(
-    await request.post('/api/v1/ibkr/orders', {
-      headers: session.mutationHeaders,
-      data: { ...body, draft: { ...draft, confirmId: preview.confirmId } },
-    }),
-  )
-  if (!result.order?.id) throw new Error('Missing test-owned order receipt')
-  return result.order.id
 }
 async function cleanup(
   request: APIRequestContext,

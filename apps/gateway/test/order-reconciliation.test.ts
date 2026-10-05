@@ -50,6 +50,35 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+it.each([
+  [EventName.openOrder, { auxPrice: 0.5 }],
+  [EventName.openOrder, { trailingPercent: 2 }],
+  [EventName.completedOrder, { auxPrice: 0.5 }],
+  [EventName.completedOrder, { trailingPercent: 2 }],
+])('clears old guessed pip distance on authoritative %s trailing readback %j', (event, trail) => {
+  const { ib, store } = fixture()
+  store.upsertOrder({ ...baseOrder, type: 'trailing-stop', trailingStopPips: 50 })
+  const contract = { symbol: 'AAPL', secType: 'STK', exchange: 'SMART', currency: 'USD' }
+  const order = {
+    orderId: 1316,
+    account: 'DU123',
+    action: 'BUY',
+    orderType: 'TRAIL',
+    totalQuantity: 1,
+    ...trail,
+  }
+  if (event === EventName.openOrder) ib.emit(event, 1316, contract, order, { status: 'Submitted' })
+  else ib.emit(event, contract, order, { status: 'Filled', completedStatus: 'Filled' })
+  const state = store.getState()
+  const restored = [...state.orders, ...(state.ordersHistory ?? [])].find(
+    (item) => item.id === '1316',
+  )
+  expect(restored).toBeDefined()
+  expect(restored?.trailingStopPips).toBeUndefined()
+  if ('auxPrice' in trail) expect(restored?.customFields?.ibkrTrailingAmount).toBe(0.5)
+  else expect(restored?.trailPercent).toBe(2)
+})
+
 it('retains a filled bracket leg and applies a later detailed order status in History', () => {
   const { ib, store } = fixture()
   store.upsertOrder(baseOrder)
@@ -371,3 +400,168 @@ it.each([
   )
   expect(store.getState().orders[0]?.status).toBe(expected)
 })
+
+it('restores a real completed order by permId without inventing an API order id', () => {
+  const { ib, store } = fixture()
+  ib.emit(
+    EventName.completedOrder,
+    { symbol: 'AAPL', secType: 'STK', conId: 100, exchange: 'SMART', currency: 'USD' },
+    {
+      permId: 700,
+      account: 'DU123',
+      action: 'BUY',
+      orderType: 'LMT',
+      totalQuantity: 2,
+      lmtPrice: 100,
+    },
+    { completedStatus: 'Filled' },
+  )
+  expect(store.getState().ordersHistory?.[0]).toMatchObject({
+    id: 'perm:700',
+    permId: 700,
+    status: 'filled',
+    filledQuantity: 2,
+  })
+  expect(store.getState().ordersHistory?.[0]?.brokerOrderId).toBeUndefined()
+})
+
+it('matches a completed permId to the stored working order and preserves its API identity', () => {
+  const { ib, store } = fixture()
+  store.upsertOrder({ ...baseOrder, permId: 700 })
+  ib.emit(
+    EventName.completedOrder,
+    { symbol: 'AAPL', secType: 'STK', exchange: 'SMART', currency: 'USD' },
+    {
+      permId: 700,
+      account: 'DU123',
+      action: 'BUY',
+      orderType: 'LMT',
+      totalQuantity: 1,
+      lmtPrice: 100,
+    },
+    { completedStatus: 'Cancelled' },
+  )
+  expect(store.getState().orders).toEqual([])
+  expect(store.getState().ordersHistory?.[0]).toMatchObject({
+    id: '1316',
+    brokerOrderId: 1316,
+    permId: 700,
+    status: 'cancelled',
+  })
+})
+
+it('keeps unbound manual orders and other clients separate despite API id collisions', () => {
+  const { ib, store } = fixture()
+  const contract = { symbol: 'AAPL', secType: 'STK', exchange: 'SMART', currency: 'USD' }
+  const order = {
+    account: 'DU123',
+    action: 'BUY',
+    orderType: 'LMT',
+    totalQuantity: 1,
+    lmtPrice: 100,
+  }
+  ib.emit(
+    EventName.openOrder,
+    0,
+    contract,
+    { ...order, permId: 701, clientId: 0 },
+    { status: 'Submitted' },
+  )
+  ib.emit(
+    EventName.openOrder,
+    0,
+    contract,
+    { ...order, permId: 702, clientId: 0 },
+    { status: 'Submitted' },
+  )
+  ib.emit(
+    EventName.openOrder,
+    25,
+    contract,
+    { ...order, permId: 703, clientId: 0 },
+    { status: 'Submitted' },
+  )
+  ib.emit(
+    EventName.openOrder,
+    25,
+    contract,
+    { ...order, permId: 704, clientId: 2 },
+    { status: 'Submitted' },
+  )
+  expect(store.getState().orders.map((o) => o.id)).toEqual([
+    'perm:701',
+    'perm:702',
+    '25',
+    'perm:704',
+  ])
+  ib.emit(EventName.orderStatus, 25, 'Filled', 1, 0, 100, 704, 0, 100, 2)
+  expect(store.getState().ordersHistory?.[0]?.id).toBe('perm:704')
+  expect(store.getState().orders.find((o) => o.id === '25')?.status).toBe('working')
+})
+
+it('does not count individual executions as parent fills for a restored BAG without stored legs', () => {
+  const { ib, store } = fixture()
+  ib.emit(
+    EventName.openOrder,
+    1316,
+    { symbol: 'AAPL', secType: 'BAG', exchange: 'SMART', currency: 'USD' },
+    { account: 'DU123', action: 'BUY', orderType: 'LMT', totalQuantity: 1, lmtPrice: 1 },
+    { status: 'Submitted' },
+  )
+  ib.emit(
+    EventName.execDetails,
+    0,
+    { symbol: 'AAPL', secType: 'OPT', conId: 700, currency: 'USD' },
+    {
+      orderId: 1316,
+      execId: 'leg.01',
+      acctNumber: 'DU123',
+      side: 'BOT',
+      shares: 1,
+      price: 2,
+      cumQty: 1,
+    },
+  )
+  expect(store.getState().orders[0]).toMatchObject({ id: '1316', status: 'working' })
+  expect(store.getState().ordersHistory).toEqual([])
+})
+
+it('preserves partial-fill status across Submitted order-status and open-order readbacks', () => {
+  const { ib, store } = fixture()
+  store.upsertOrder({ ...baseOrder, quantity: 2 })
+  ib.emit(EventName.orderStatus, 1316, 'Submitted', 1, 1, 100)
+  expect(store.getState().orders[0]?.status).toBe('partially-filled')
+  ib.emit(
+    EventName.openOrder,
+    1316,
+    { symbol: 'AAPL', secType: 'STK', currency: 'USD' },
+    { account: 'DU123', action: 'BUY', orderType: 'LMT', totalQuantity: 2, lmtPrice: 100 },
+    { status: 'Submitted' },
+  )
+  expect(store.getState().orders[0]).toMatchObject({
+    status: 'partially-filled',
+    filledQuantity: 1,
+    remainingQuantity: 1,
+  })
+})
+
+it.each(['partially-filled', 'filled'] as const)(
+  'does not erase %s quantities on a stale Submitted callback',
+  (status) => {
+    const { ib, store } = fixture()
+    store.upsertOrder({
+      ...baseOrder,
+      quantity: 2,
+      status,
+      filledQuantity: status === 'filled' ? 2 : 1,
+      remainingQuantity: status === 'filled' ? 0 : 1,
+    })
+    ib.emit(EventName.orderStatus, 1316, 'Submitted', 0, 2, 0)
+    const readback = [...store.getState().orders, ...store.getState().ordersHistory!][0]
+    expect(readback).toMatchObject({
+      status,
+      filledQuantity: status === 'filled' ? 2 : 1,
+      remainingQuantity: status === 'filled' ? 0 : 1,
+    })
+  },
+)

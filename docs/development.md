@@ -48,12 +48,23 @@ Do not stop user processes or touch unrelated broker orders during development.
 
 ## Structure and checks
 
-Brand artwork comes from TradeMind's `branding/tradescript-logo.svg`. The terminal's
-`public/tradescript-mark.svg` and `public/favicon.svg` use that repository's generated
-website assets. Desktop `icons/app-icon.svg` uses its generated native icon framing;
-only the outer accessibility title is added here. Preserve the original paths and
-gradients. Regenerate desktop PNG, ICNS and ICO files with Tauri's `icon` command
-from that SVG, copying only the desktop outputs into `apps/desktop/src-tauri/icons`.
+The independent app is named **IBKR Tradescript Terminal**. Its display name comes
+from `apps/desktop/src-tauri/tauri.conf.json`; the native window and frontend share
+that source. Keep the existing bundle identifier and internal executable/storage
+names so the display-name change preserves saved settings and credentials.
+
+The owned `src-tauri/windows/installer.nsi` template keeps the published Windows
+installer keys and folders under a separate stable installation identity while
+using the new display name. Its contract test pins the upstream Tauri template;
+review that source when upgrading the bundler. macOS updates retain the running
+app bundle path. A Windows installation/upgrade smoke test is still required
+before releasing the renamed installer.
+
+The app's selected red-and-silver ribbon artwork is owned by `apps/desktop/icon.png`.
+Run `npm run desktop:icons` after editing it. This generates the native PNG, ICNS
+and ICO files, and the terminal's `public/terminal-logo.png`
+and `public/favicon.png`. Do not edit those generated outputs. The TradeScript SDK
+and its licence retain their own branding.
 
 Keep shared wire schemas in `packages/contracts`, service lifecycle code in
 `packages/service-runtime`, and application-specific behavior in its owning app.

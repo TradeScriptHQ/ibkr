@@ -99,6 +99,11 @@ export function toBackendDraft(
     throw new Error(`The local paper bridge does not support ${draft.parentType} parent drafts.`)
   }
   const symbol = draft.symbol
+  if (symbol.type === undefined) {
+    throw new Error(
+      'The instrument type is unavailable or unsupported. Resolve a supported contract before submitting an order.',
+    )
+  }
   if (!symbol.currency) {
     throw new Error(
       'The instrument currency is unavailable. Resolve the instrument before submitting an order.',
@@ -114,6 +119,7 @@ export function toBackendDraft(
     accountId: draft.accountId,
     symbol: {
       symbol: symbol.brokerSymbol ?? symbol.ticker,
+      canonicalSymbol: symbol.canonicalSymbol,
       exchange: symbol.exchange,
       primaryExchange: symbol.listedExchange,
       currency: symbol.currency,
@@ -204,9 +210,13 @@ export function toBackendOptionOrderLeg(
 
 export function toBackendOptionContract(contract: TradingOptionContract): BackendOptionContract {
   return {
+    ...('tradingClass' in contract && typeof contract.tradingClass === 'string'
+      ? { tradingClass: contract.tradingClass }
+      : {}),
     underlying: contract.underlying,
     underlyingSymbolInfo: {
-      symbol: contract.underlying,
+      symbol: contract.underlyingSymbolInfo.brokerSymbol ?? contract.underlyingSymbolInfo.ticker,
+      canonicalSymbol: contract.underlyingSymbolInfo.canonicalSymbol,
       exchange: contract.underlyingSymbolInfo.exchange,
       primaryExchange: contract.underlyingSymbolInfo.listedExchange,
       currency: contract.underlyingSymbolInfo.currency ?? contract.currency,

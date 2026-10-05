@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 
 const SESSION_IDLE_TTL_MS = 30 * 60 * 1000
 const SESSION_ABSOLUTE_TTL_MS = 12 * 60 * 60 * 1000
@@ -29,6 +29,7 @@ function matches(left: Buffer, right: Buffer): boolean {
 export class SessionStore {
   readonly #sessions = new Map<string, StoredSession>()
   readonly #now: () => number
+  readonly #csrfKey = randomBytes(32)
 
   constructor(now: () => number = Date.now) {
     this.#now = now
@@ -37,7 +38,7 @@ export class SessionStore {
   issue(): IssuedSession {
     this.prune()
     const sessionId = randomBytes(32).toString('base64url')
-    const csrfToken = randomBytes(32).toString('base64url')
+    const csrfToken = this.#csrfToken(sessionId)
     const sessionHash = digest(sessionId)
     const now = this.#now()
     const absoluteExpiresAtMs = now + SESSION_ABSOLUTE_TTL_MS
@@ -48,6 +49,21 @@ export class SessionStore {
       idleExpiresAtMs: now + SESSION_IDLE_TTL_MS,
     })
     return { sessionId, csrfToken, expiresAt: new Date(absoluteExpiresAtMs).toISOString() }
+  }
+
+  resume(sessionId: string | undefined): IssuedSession | undefined {
+    if (sessionId === undefined || !this.validate(sessionId)) return undefined
+    const stored = this.#sessions.get(digest(sessionId).toString('hex'))
+    if (!stored) return undefined
+    return {
+      sessionId,
+      csrfToken: this.#csrfToken(sessionId),
+      expiresAt: new Date(stored.absoluteExpiresAtMs).toISOString(),
+    }
+  }
+
+  #csrfToken(sessionId: string): string {
+    return createHmac('sha256', this.#csrfKey).update(sessionId, 'utf8').digest('base64url')
   }
 
   validate(sessionId: string | undefined): boolean {

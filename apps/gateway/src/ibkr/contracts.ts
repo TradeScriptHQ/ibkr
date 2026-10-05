@@ -1,5 +1,6 @@
-import type { Contract, ContractDescription, ContractDetails } from '@stoqey/ib'
+import type { Contract, ContractDescription, ContractDetails, Order as IbOrder } from '@stoqey/ib'
 import { OptionType, SecType } from '@stoqey/ib'
+import { authoritativePipDefinition } from './pip-definitions.js'
 import { RequestError } from './request-error.js'
 import type {
   BrokerSymbol,
@@ -78,7 +79,9 @@ export function normalizeTicker(value: string): string {
   return value
     .trim()
     .toUpperCase()
-    .replace(/[^A-Z0-9.:-]/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[^A-Z0-9 .:-]/g, '')
+    .trim()
 }
 
 export function brokerContractSourceRouteKey(contract: Contract): string {
@@ -86,6 +89,13 @@ export function brokerContractSourceRouteKey(contract: Contract): string {
     String(contract.secType ?? ''),
     String(contract.symbol ?? '').toUpperCase(),
     String(contract.currency ?? '').toUpperCase(),
+    // Only naturally identified contracts can bridge a conId-less submission
+    // to a qualified readback. Expiries, strikes and outcomes need exact identity.
+    ...([String(SecType.STK), String(SecType.CASH), String(SecType.CRYPTO)].includes(
+      String(contract.secType),
+    )
+      ? []
+      : [String(contract.conId ?? '')]),
   ].join('|')
 }
 
@@ -191,6 +201,8 @@ export function toIbContract(
   duration?: OrderDuration,
   routingDestination?: string,
 ): Contract {
+  const nativeOption = toIbNativeOptionContract(symbol)
+  if (nativeOption) return applyOrderRoutingDestination(nativeOption, routingDestination, duration)
   const assetClass =
     symbol.assetClass || symbol.exchange
       ? resolveAssetClass(symbol.assetClass, symbol.exchange)
@@ -237,14 +249,47 @@ export function toIbContract(
     }
   }
   if (assetClass === 'forex') {
+    const conId = symbol.contractIdentity?.conId ?? nativeContractId(symbol.canonicalSymbol ?? '')
+    if (conId !== undefined) {
+      if (
+        !Number.isSafeInteger(conId) ||
+        conId <= 0 ||
+        symbol.contractIdentity?.securityType !== SecType.CASH ||
+        !symbol.currency?.trim() ||
+        symbol.exchange !== FOREX_EXCHANGE ||
+        (symbol.canonicalSymbol && nativeContractId(symbol.canonicalSymbol) !== conId)
+      )
+        throw new RequestError(400, 'Select an exact FX contract with matching native identity.')
+      return applyOrderRoutingDestination(
+        { conId, secType: SecType.CASH, exchange: FOREX_EXCHANGE, currency: symbol.currency },
+        routingDestination,
+        duration,
+      )
+    }
     const forex = parseForexSymbol(symbol.symbol, symbol.currency)
     if (!forex) {
       throw new RequestError(400, `Unsupported forex pair ${symbol.symbol}`)
     }
     return applyOrderRoutingDestination(toIbForexContract(forex), routingDestination, duration)
   }
+  const stockIds = [
+    symbol.contractIdentity?.conId,
+    nativeContractId(symbol.symbol),
+    nativeContractId(symbol.canonicalSymbol ?? ''),
+  ].filter((id): id is number => id !== undefined)
+  const stockConId = stockIds[0]
+  if (
+    (stockConId !== undefined &&
+      (!Number.isSafeInteger(stockConId) ||
+        stockConId <= 0 ||
+        stockIds.some((id) => id !== stockConId))) ||
+    (symbol.contractIdentity?.securityType && symbol.contractIdentity.securityType !== SecType.STK)
+  ) {
+    throw new RequestError(400, 'Select a stock contract with matching exact IBKR identity.')
+  }
   return {
-    symbol: symbol.symbol.toUpperCase(),
+    ...(nativeContractId(symbol.symbol) ? {} : { symbol: symbol.symbol.toUpperCase() }),
+    ...(stockConId !== undefined ? { conId: stockConId } : {}),
     secType: SecType.STK,
     exchange:
       duration === 'overnight'
@@ -255,6 +300,35 @@ export function toIbContract(
       ? { primaryExch: symbol.primaryExchange.trim().toUpperCase() }
       : {}),
   }
+}
+
+/** Reconstruct a broker-originated single option without inventing a leg position effect. */
+export function toIbNativeOptionContract(symbol: BrokerSymbol): Contract | undefined {
+  const type = symbol.assetClass?.trim().toLowerCase()
+  if (type !== 'option' && type !== 'futures-option') return undefined
+  const secType = type === 'option' ? SecType.OPT : SecType.FOP
+  const identifiers = [
+    symbol.contractIdentity?.conId,
+    nativeContractId(symbol.symbol),
+    nativeContractId(symbol.canonicalSymbol ?? ''),
+  ].filter((id): id is number => id !== undefined)
+  const conId = identifiers[0]
+  if (
+    conId === undefined ||
+    !Number.isSafeInteger(conId) ||
+    conId <= 0 ||
+    identifiers.some((id) => id !== conId) ||
+    (symbol.contractIdentity?.securityType && symbol.contractIdentity.securityType !== secType) ||
+    !symbol.exchange?.trim() ||
+    !symbol.currency?.trim() ||
+    symbol.exchange.trim().toUpperCase() === 'FORECASTX'
+  ) {
+    throw new RequestError(
+      400,
+      'Select an exact option contract with matching identity, exchange and currency.',
+    )
+  }
+  return { conId, secType, exchange: symbol.exchange, currency: symbol.currency }
 }
 
 export function applyOrderRoutingDestination(
@@ -274,11 +348,18 @@ export function normalizeRoutingDestination(value?: string): string | undefined 
 }
 
 export function toIbQuoteContract(symbol: BrokerSymbol, marketDataExchange?: string): Contract {
+  requireQuoteIdentity(symbol)
   const contract = toIbContract(symbol)
   if (!marketDataExchange) return contract
   // A quote venue replaces the listing hint; order routing remains separate.
   const { primaryExch: _listing, ...quoteContract } = contract
   return { ...quoteContract, exchange: marketDataExchange }
+}
+
+export function requireQuoteIdentity(symbol: BrokerSymbol): void {
+  if (!symbol.assetClass?.trim() && !symbol.exchange?.trim()) {
+    throw new RequestError(400, 'Select an instrument type and exchange before requesting quotes.')
+  }
 }
 
 export function listingMarketDataExchange(symbol: BrokerSymbol): string | undefined {
@@ -289,9 +370,8 @@ export function listingMarketDataExchange(symbol: BrokerSymbol): string | undefi
 
 export function normalizeStockRoutingExchange(exchange?: string): string {
   const normalized = exchange?.trim().toUpperCase()
-  // IBKR exposes NASDAQ as a stock's listing/primary exchange. It is not the
-  // API routing destination (ISLAND is the corresponding direct venue), so a
-  // generic NASDAQ stock selection must continue to use SmartRouting.
+  // A generic listing selection uses SmartRouting. NASDAQ is also a valid direct
+  // API venue in modern TWS; the listing label alone does not request that route.
   if (!normalized || normalized === 'NASDAQ') return 'SMART'
   return normalized
 }
@@ -309,6 +389,7 @@ export function toIbOptionContract(contract: OptionContract): Contract {
     strike: contract.strike,
     right: contract.right === 'call' ? OptionType.Call : OptionType.Put,
     multiplier: contract.multiplier,
+    ...(contract.tradingClass === undefined ? {} : { tradingClass: contract.tradingClass }),
     exchange: contract.route || contract.exchange || 'SMART',
     currency: contract.currency ?? 'USD',
   }
@@ -335,6 +416,7 @@ export function normalizeBrokerSymbol(symbol: BrokerSymbol): BrokerSymbol {
       assetClass,
       sourceSymbol: symbol.sourceSymbol,
       canonicalSymbol: symbol.canonicalSymbol,
+      ...(symbol.contractIdentity ? { contractIdentity: symbol.contractIdentity } : {}),
     }
   }
   if (assetClass === 'crypto') {
@@ -360,22 +442,28 @@ export function normalizeBrokerSymbol(symbol: BrokerSymbol): BrokerSymbol {
 
 export function brokerSymbolKey(symbol: BrokerSymbol): string {
   const normalized = normalizeBrokerSymbol(symbol)
-  if (normalized.contractIdentity?.conId)
-    return `IBKR:${normalized.contractIdentity.conId}:${normalized.exchange ?? ''}`
+  const conId = normalized.contractIdentity?.conId ?? nativeContractId(normalized.symbol)
+  if (conId) return `IBKR:${conId}:${normalized.exchange ?? ''}:${normalized.currency ?? ''}`
   return [
     normalized.assetClass ?? 'stock',
     normalized.symbol,
     normalized.exchange ?? '',
     normalized.currency ?? '',
+    normalized.primaryExchange ?? '',
   ].join(':')
 }
 
 export function toMarketSymbol(details: ContractDetails): MarketSymbol | undefined {
   const contract = details.contract
+  const pipDefinition = authoritativePipDefinition(fromIbSymbol(contract))
   const type =
     contract.secType === SecType.OPT && contract.exchange === 'FORECASTX'
       ? 'event-contract'
-      : toSupportedAssetClass(contract.secType)
+      : contract.secType === SecType.FOP
+        ? 'futures-option'
+        : contract.secType === SecType.OPT
+          ? 'option'
+          : toSupportedAssetClass(contract.secType)
   if (!type) return undefined
   if (type !== 'stock' && type !== 'crypto' && type !== 'forex') {
     const canonicalSymbol = contractCanonicalSymbol(contract)
@@ -430,6 +518,7 @@ export function toMarketSymbol(details: ContractDetails): MarketSymbol | undefin
           }
         : {}),
       contractIdentity: nativeContractIdentity(contract),
+      ...(pipDefinition ? { pipDefinition } : {}),
     }
   }
   if (type === 'forex') {
@@ -438,6 +527,8 @@ export function toMarketSymbol(details: ContractDetails): MarketSymbol | undefin
       ? {
           ...toForexMarketSymbol(forex, details.longName ?? details.marketName, details.minTick),
           canonicalSymbol: contractCanonicalSymbol(contract),
+          contractIdentity: nativeContractIdentity(contract),
+          ...(pipDefinition ? { pipDefinition } : {}),
         }
       : undefined
   }
@@ -457,6 +548,8 @@ export function toMarketSymbol(details: ContractDetails): MarketSymbol | undefin
     currency: contract.currency,
     description: details.longName ?? details.marketName,
     minTick: details.minTick,
+    contractIdentity: nativeContractIdentity(contract),
+    ...(pipDefinition ? { pipDefinition } : {}),
   }
 }
 
@@ -554,7 +647,8 @@ export function toIbForexContract(pair: { base: string; quote: string }): Contra
 }
 
 export function searchForexSymbols(query: string): MarketSymbol[] {
-  const compactQuery = query.replace(/[^A-Z]/g, '')
+  const compactQuery = query.toUpperCase().replace(/[^A-Z]/g, '')
+  if (/\d/.test(query) || compactQuery.length < 3) return []
   const exact = parseForexSymbol(compactQuery)
   const candidates = exact ? [forexTicker(exact), ...MAJOR_FOREX_PAIRS] : MAJOR_FOREX_PAIRS
   return [...new Set(candidates)]
@@ -579,11 +673,13 @@ export function uniqueMarketSymbols(symbols: MarketSymbol[]): MarketSymbol[] {
 }
 
 export function fromIbSymbol(contract: Contract): BrokerSymbol {
-  return {
+  const symbol: BrokerSymbol = {
     ...fromIbSymbolDetails(contract),
     canonicalSymbol: contractCanonicalSymbol(contract),
     contractIdentity: nativeContractIdentity(contract),
   }
+  const pipDefinition = authoritativePipDefinition(symbol)
+  return pipDefinition ? { ...symbol, pipDefinition } : symbol
 }
 
 export function nativeContractId(value: string): number | undefined {
@@ -690,6 +786,8 @@ export function fromIbOptionContract(contract: Contract): OptionContract | undef
   const right = String(contract.right ?? '').toUpperCase()
   if (right !== 'C' && right !== 'CALL' && right !== 'P' && right !== 'PUT') return undefined
   const underlying = String(contract.symbol ?? '').toUpperCase()
+  const multiplier = Number(contract.multiplier)
+  if (!Number.isFinite(multiplier) || multiplier <= 0) return undefined
   return {
     underlying,
     underlyingSymbolInfo: withBrokerSourceSymbol({
@@ -704,25 +802,35 @@ export function fromIbOptionContract(contract: Contract): OptionContract | undef
     ),
     strike: Number(contract.strike ?? 0),
     right: right === 'C' || right === 'CALL' ? 'call' : 'put',
-    multiplier: Number(contract.multiplier ?? 100),
+    multiplier,
     exchange: contract.exchange,
     route: contract.exchange,
-    currency: contract.currency ?? 'USD',
+    currency: contract.currency,
     symbol: contract.localSymbol,
     brokerContractId: contract.conId,
   }
 }
 
-export function fromIbOptionLegs(contract: Contract): OptionOrderLegDraft[] {
+export function fromIbOptionLegs(contract: Contract, order: IbOrder): OptionOrderLegDraft[] {
   if (isOptionSecType(contract.secType)) {
     const optionContract = fromIbOptionContract(contract)
-    return optionContract
+    const action = String(order.action ?? '').toUpperCase()
+    const quantity = Number(order.totalQuantity)
+    const positionEffect =
+      order.openClose === 'O' ? 'open' : order.openClose === 'C' ? 'close' : undefined
+    // The SDK leg requires a position effect. Keep unknown readbacks on their
+    // exact contract symbol instead of inventing buy-to-open one-lot legs.
+    return optionContract &&
+      (action === 'BUY' || action === 'SELL') &&
+      Number.isFinite(quantity) &&
+      quantity > 0 &&
+      positionEffect
       ? [
           {
             contract: optionContract,
-            side: 'buy',
-            positionEffect: 'open',
-            quantity: 1,
+            side: action === 'SELL' ? 'sell' : 'buy',
+            positionEffect,
+            quantity,
             ratio: 1,
           },
         ]

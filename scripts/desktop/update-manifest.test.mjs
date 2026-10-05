@@ -15,8 +15,8 @@ test('release manifest requires complete signed artifacts with unique GitHub dow
       const file = path.join(
         folder,
         target.startsWith('darwin')
-          ? 'TradeScript Terminal.app.tar.gz'
-          : 'TradeScript Terminal_0.1.0_x64-setup.exe',
+          ? 'IBKR Tradescript Terminal.app.tar.gz'
+          : 'IBKR Tradescript Terminal_0.1.0_x64-setup.exe',
       )
       await writeFile(file, 'fixture')
       await writeFile(`${file}.sig`, 'fixture-signature')
@@ -34,11 +34,11 @@ test('release manifest requires complete signed artifacts with unique GitHub dow
     assert.equal(manifest.platforms['windows-x86_64'].signature, 'fixture-signature')
     assert.equal(
       manifest.platforms['darwin-aarch64'].url,
-      `${options.baseUrl}/darwin-aarch64-TradeScript.Terminal.app.tar.gz`,
+      `${options.baseUrl}/darwin-aarch64-IBKR.Tradescript.Terminal.app.tar.gz`,
     )
     assert.equal(
       manifest.platforms['windows-x86_64'].url,
-      `${options.baseUrl}/windows-x86_64-TradeScript.Terminal_0.1.0_x64-setup.exe`,
+      `${options.baseUrl}/windows-x86_64-IBKR.Tradescript.Terminal_0.1.0_x64-setup.exe`,
     )
     const staged = path.join(dir, 'downloads')
     await stageRelease(dir, staged, options)
@@ -51,13 +51,13 @@ test('release manifest requires complete signed artifacts with unique GitHub dow
     }
     await assert.rejects(stageRelease(dir, staged, options), { code: 'EEXIST' })
     await assert.rejects(createManifest(dir, { ...options, baseUrl: 'http://example.test' }))
-    await rm(path.join(dir, 'windows-x86_64', 'TradeScript Terminal_0.1.0_x64-setup.exe'))
+    await rm(path.join(dir, 'windows-x86_64', 'IBKR Tradescript Terminal_0.1.0_x64-setup.exe'))
     await assert.rejects(createManifest(dir, options))
     await writeFile(
-      path.join(dir, 'windows-x86_64', 'TradeScript Terminal_0.1.0_x64-setup.exe'),
+      path.join(dir, 'windows-x86_64', 'IBKR Tradescript Terminal_0.1.0_x64-setup.exe'),
       'fixture',
     )
-    for (const name of ['TradeScript Terminal.dmg', 'TradeScript.Terminal.dmg'])
+    for (const name of ['IBKR Tradescript Terminal.dmg', 'IBKR.Tradescript.Terminal.dmg'])
       await writeFile(path.join(dir, 'darwin-aarch64', name), 'fixture')
     await assert.rejects(
       stageRelease(dir, path.join(dir, 'collision'), options),

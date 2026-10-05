@@ -47,8 +47,8 @@ jobs:
           doppler_file="$RUNNER_TEMP/desktop-secrets.json"
           trap 'rm -f "$doppler_file"' EXIT
           node scripts/desktop/fetch-doppler-secrets.mjs "$doppler_file"
-          jq -r '(.npm + .signing) | to_entries[] | "::add-mask::\(.value)"' "$doppler_file"
-          jq -r '(.npm + .signing) | to_entries[] | "\(.key)=\(.value)"' "$doppler_file" >> "$GITHUB_ENV"
+          jq -r '.npm | to_entries[] | "::add-mask::\(.value)"' "$doppler_file"
+          jq -r '.npm | to_entries[] | "\(.key)=\(.value)"' "$doppler_file" >> "$GITHUB_ENV"
           rm -f "$doppler_file"
       - run: npm ci
       - run: npm run check
@@ -56,7 +56,9 @@ jobs:
       - run: npm run test:desktop:native
       - run: node scripts/desktop/release-config.mjs
       - name: Build installers and signed updates
-        run: npm run build --workspace=@ibkr-terminal/desktop -- --config src-tauri/tauri.release.json --bundles ${{ matrix.bundles }}
+        env:
+          DOPPLER_TOKEN: ${{ secrets.IBKR_DOPPLER_API_TOKEN }}
+        run: node scripts/desktop/sign-release.mjs --config src-tauri/tauri.release.json --bundles ${{ matrix.bundles }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -89,4 +91,5 @@ jobs:
         shell: bash
         run: |
           printf '%s' "$RELEASE_NOTES" > release-notes.txt
-          gh release create "v$RELEASE_VERSION" downloads/* --draft --target "${{ github.sha }}" --title "TradeScript Terminal $RELEASE_VERSION" --notes-file release-notes.txt
+          release_product_name="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync("apps/desktop/src-tauri/tauri.conf.json", "utf8")).productName)')"
+          gh release create "v$RELEASE_VERSION" downloads/* --draft --target "${{ github.sha }}" --title "$release_product_name $RELEASE_VERSION" --notes-file release-notes.txt

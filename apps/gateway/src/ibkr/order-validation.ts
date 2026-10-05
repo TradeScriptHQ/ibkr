@@ -1,6 +1,12 @@
-import { normalizeStockRoutingExchange, resolveAssetClass } from './contracts.js'
+import {
+  normalizeStockRoutingExchange,
+  resolveAssetClass,
+  toIbNativeOptionContract,
+} from './contracts.js'
 import { positivePrice, positiveQuantity, quantityGreaterThan } from './numbers.js'
-import { hasOptionLegs, hasStrategyLegs } from './order-strategy.js'
+import { exitChildDrafts } from './order-exits.js'
+import { hasOptionLegs, hasStrategyLegs, strategyOrderQuantity } from './order-strategy.js'
+import { pipDistanceInPrice } from './pip-definitions.js'
 import type {
   BrokerSymbol,
   OptionOrderLegDraft,
@@ -10,6 +16,7 @@ import type {
   OrderPatch,
   OrderPreviewResult,
   OrderType,
+  StrategyOrderLegDraft,
 } from './types.js'
 
 export function previewConfirmationId(): string {
@@ -130,6 +137,33 @@ export function validateDraft(draft: OrderDraft): OrderPreviewResult {
   if (hasOptionLegs(draft)) {
     return validateOptionDraft(draft)
   }
+  if (draft.symbol.assetClass === 'option' || draft.symbol.assetClass === 'futures-option') {
+    try {
+      toIbNativeOptionContract(draft.symbol)
+    } catch (error) {
+      return {
+        accepted: false,
+        reason: error instanceof Error ? error.message : 'Exact option contract required.',
+      }
+    }
+    if (!Number.isInteger(draft.quantity))
+      return { accepted: false, reason: 'Option quantity must be a whole number of contracts.' }
+    if (draft.type !== 'limit' && draft.type !== 'market')
+      return {
+        accepted: false,
+        reason: 'Native option readbacks support market and limit order modifications.',
+      }
+    if (draft.type === 'limit' && !positivePrice(draft.limitPrice))
+      return { accepted: false, reason: 'Option limit orders require a limit price.' }
+    if (!['day', 'gtc', 'gtd', 'ioc', 'fok'].includes(draft.duration))
+      return {
+        accepted: false,
+        reason: 'This duration is not supported for native option readbacks.',
+      }
+    if (draft.exits)
+      return { accepted: false, reason: 'Native option readbacks cannot attach stock exit plans.' }
+    return { accepted: true }
+  }
   if (assetClass === 'index')
     return {
       accepted: false,
@@ -199,6 +233,32 @@ export function validateDraft(draft: OrderDraft): OrderPreviewResult {
   if (orderNeedsStopPrice(draft.type) && !positivePrice(draft.stopPrice)) {
     return { accepted: false, reason: `${orderTypeDisplayName(draft.type)} requires a stop price.` }
   }
+  if (draft.type === 'trailing-stop') {
+    const hasPercent = draft.trailPercent !== undefined
+    const hasPips = draft.trailingStopPips !== undefined
+    if (hasPercent === hasPips) {
+      return {
+        accepted: false,
+        reason: 'Trailing stop orders require exactly one trailing percent or pip distance.',
+      }
+    }
+    if (!positivePrice(hasPercent ? draft.trailPercent : draft.trailingStopPips)) {
+      return { accepted: false, reason: 'Trailing stop distance must be greater than zero.' }
+    }
+    if (hasPips && pipDistanceInPrice(draft.symbol, Number(draft.trailingStopPips)) === undefined) {
+      return {
+        accepted: false,
+        reason:
+          'Pip-based trailing stops are unavailable: the authoritative instrument pip size is not supplied. Use trailing percent or TWS.',
+      }
+    }
+    if (draft.stopPrice !== undefined && !positivePrice(draft.stopPrice)) {
+      return { accepted: false, reason: 'Initial trailing stop price must be greater than zero.' }
+    }
+  }
+  if (draft.type === 'trailing-stop-limit' && draft.trailingStopPips !== undefined) {
+    return { accepted: false, reason: 'Trailing stop-limit orders support trailing percent only.' }
+  }
   if (orderNeedsTrailPercent(draft.type) && !positivePrice(draft.trailPercent)) {
     return {
       accepted: false,
@@ -220,6 +280,13 @@ export function applyOrderPatch(existing: OrderDraft, patch: OrderPatch): OrderD
     ...existing,
     ...patch,
     oca: patch.oca === null ? undefined : (patch.oca ?? existing.oca),
+    ...(patch.oca === undefined ? {} : { ocaGroup: undefined, ocaType: undefined }),
+    ...(patch.trailPercent !== undefined && patch.trailingStopPips === undefined
+      ? { trailingStopPips: undefined }
+      : {}),
+    ...(patch.trailingStopPips !== undefined && patch.trailPercent === undefined
+      ? { trailPercent: undefined }
+      : {}),
     displaySize:
       patch.displaySize === null ? undefined : (patch.displaySize ?? existing.displaySize),
     ...(customFields === undefined ? {} : { customFields }),
@@ -254,7 +321,10 @@ function validateOptionDraft(draft: OrderDraft): OrderPreviewResult {
     const validation = validateOptionLeg(leg, underlying)
     if (!validation.accepted) return validation
   }
-  return { accepted: true }
+  return validateStrategyUnits(
+    draft,
+    legs.map((leg) => ({ ...leg, instrument: 'option' })),
+  )
 }
 
 function sameOptionUnderlying(leg: OptionOrderLegDraft, symbol: BrokerSymbol): boolean {
@@ -284,18 +354,6 @@ function validateStrategyDraft(draft: OrderDraft): OrderPreviewResult {
   const legs = draft.strategyLegs ?? []
   if (!legs.length) return { accepted: false, reason: 'Strategy order requires at least one leg.' }
   const underlying = draft.symbol.symbol.trim().toUpperCase()
-  const units = legs.map((leg) =>
-    leg.instrument === 'equity' ? leg.quantity / leg.ratio : leg.quantity,
-  )
-  if (
-    units.some((unit) => !Number.isFinite(unit) || unit <= 0) ||
-    units.some((unit) => Math.abs(unit - Number(units[0])) > 1e-8)
-  ) {
-    return {
-      accepted: false,
-      reason: 'Strategy leg quantities and ratios must represent the same strategy-unit quantity.',
-    }
-  }
   for (const leg of legs) {
     if (leg.instrument === 'option') {
       const validation = validateOptionLeg(leg, underlying)
@@ -310,6 +368,46 @@ function validateStrategyDraft(draft: OrderDraft): OrderPreviewResult {
         accepted: false,
         reason: 'Equity strategy legs require positive quantity and ratio.',
       }
+    }
+  }
+  return validateStrategyUnits(draft, legs)
+}
+
+function validateStrategyUnits(
+  draft: OrderDraft,
+  legs: StrategyOrderLegDraft[],
+): OrderPreviewResult {
+  const units = strategyOrderQuantity(legs)
+  if (
+    !Number.isSafeInteger(units) ||
+    units <= 0 ||
+    legs.some((leg) => {
+      const ratio = leg.ratio ?? 1
+      return (
+        !Number.isSafeInteger(ratio) ||
+        ratio <= 0 ||
+        !Number.isSafeInteger(leg.quantity) ||
+        leg.quantity <= 0 ||
+        leg.quantity / ratio !== units
+      )
+    })
+  ) {
+    return {
+      accepted: false,
+      reason:
+        'Strategy leg quantities and positive whole-number ratios must represent the same whole strategy-unit quantity.',
+    }
+  }
+  if (draft.quantity !== units) {
+    return { accepted: false, reason: 'Order quantity must match the strategy-unit quantity.' }
+  }
+  const first = legs[0]
+  if (legs.length === 1 && first?.instrument === 'option') {
+    if ((first.ratio ?? 1) !== 1) {
+      return { accepted: false, reason: 'A single option order must use a ratio of one.' }
+    }
+    if (draft.side !== first.side) {
+      return { accepted: false, reason: 'Order side must match the single option leg side.' }
     }
   }
   return { accepted: true }
@@ -350,6 +448,13 @@ function validateOptionLeg(leg: OptionOrderLegDraft, underlying: string): OrderP
 }
 
 function validateExitPlan(draft: OrderDraft): OrderPreviewResult {
+  if (draft.duration === 'ioc' || draft.duration === 'fok' || draft.duration === 'opg') {
+    return {
+      accepted: false,
+      reason:
+        'Attached exits require a resting entry duration; IOC, FOK and OPG cannot attach exits.',
+    }
+  }
   const levels = draft.exits?.levels ?? []
   if (levels.length === 0)
     return { accepted: false, reason: 'An exit plan requires at least one level.' }
@@ -375,6 +480,15 @@ function validateExitPlan(draft: OrderDraft): OrderPreviewResult {
     }
     if (level.stopLoss?.kind === 'trailing' && !positivePrice(level.stopLoss.trailingPips)) {
       return { accepted: false, reason: 'Trailing stops require a positive pip distance.' }
+    }
+    if (
+      level.stopLoss?.kind === 'trailing' &&
+      pipDistanceInPrice(draft.symbol, level.stopLoss.trailingPips) === undefined
+    ) {
+      return {
+        accepted: false,
+        reason: 'Trailing protection requires an authoritative instrument pip size.',
+      }
     }
     if (level.stopLoss?.kind === 'guaranteed') {
       return { accepted: false, reason: 'IBKR does not support guaranteed stops.' }
@@ -406,6 +520,15 @@ function validateExitPlan(draft: OrderDraft): OrderPreviewResult {
         return { accepted: false, reason: 'Sell take-profit exits must be below entry.' }
       if (stopPrices.some((price) => price <= referencePrice))
         return { accepted: false, reason: 'Sell stop-loss exits must be above entry.' }
+    }
+  }
+  for (const child of exitChildDrafts(draft)) {
+    const validation = validateDraft(child.draft)
+    if (!validation.accepted) {
+      return {
+        ...validation,
+        reason: `Exit level ${child.levelId} ${child.leg}: ${validation.reason}`,
+      }
     }
   }
   return { accepted: true }
@@ -500,6 +623,9 @@ function validateDisplaySize(draft: OrderDraft): OrderPreviewResult | undefined 
 }
 
 function entryReferencePrice(draft: OrderDraft): number {
+  if (draft.type === 'trailing-stop' || draft.type === 'trailing-stop-limit') {
+    return draft.stopPrice ?? 0
+  }
   return draft.limitPrice ?? draft.stopPrice ?? 0
 }
 
@@ -527,7 +653,6 @@ function orderNeedsStopPrice(type: OrderType): boolean {
   switch (type) {
     case 'stop':
     case 'stop-limit':
-    case 'trailing-stop':
     case 'trailing-stop-limit':
       return true
     default:
@@ -536,7 +661,7 @@ function orderNeedsStopPrice(type: OrderType): boolean {
 }
 
 function orderNeedsTrailPercent(type: OrderType): boolean {
-  return type === 'trailing-stop' || type === 'trailing-stop-limit'
+  return type === 'trailing-stop-limit'
 }
 
 function orderTypeDisplayName(type: OrderType): string {

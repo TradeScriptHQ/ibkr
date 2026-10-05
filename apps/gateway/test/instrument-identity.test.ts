@@ -40,7 +40,7 @@ describe('IBKR security type identity', () => {
       contractIdentity: { securityType: secType, conId: 123, expiry: '20260918', multiplier: 10 },
     })
     expect(normalizeBrokerSymbol(symbol)).toEqual(symbol)
-    if (['FUT', 'IND', 'FUND', 'BOND', 'WAR', 'CFD', 'CMDTY'].includes(secType)) {
+    if (['FUT', 'FOP', 'IND', 'FUND', 'BOND', 'WAR', 'CFD', 'CMDTY'].includes(secType)) {
       expect(toIbContract(symbol)).toMatchObject({ secType, conId: 123 })
     } else expect(toIbContract.bind(null, symbol)).toThrow(/Unsupported instrument type/)
     expect(
@@ -52,7 +52,7 @@ describe('IBKR security type identity', () => {
         quantity: 1,
         limitPrice: 1,
       }),
-    ).toMatchObject({ accepted: ['FUT', 'BOND', 'WAR', 'CFD', 'CMDTY'].includes(secType) })
+    ).toMatchObject({ accepted: ['FUT', 'FOP', 'BOND', 'WAR', 'CFD', 'CMDTY'].includes(secType) })
   })
 
   it('does not let a familiar venue override an explicit unsupported class', () => {

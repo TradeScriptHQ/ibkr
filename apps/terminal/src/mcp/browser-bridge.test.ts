@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { McpBridgeResponseMessageSchema } from '@ibkr-terminal/contracts'
 import type { AgenticSurfaceAdapterApi } from '@tradescript/pro/sdk'
 import { afterEach, expect, it, vi } from 'vitest'
 import { connectTradeScriptMcp } from './browser-bridge.js'
@@ -9,6 +10,7 @@ const MCP_URL = 'http://127.0.0.1:41234/mcp'
 const BRIDGE_URL = 'ws://127.0.0.1:41235/bridge'
 
 interface Harness {
+  readonly bridge: ReturnType<typeof connectTradeScriptMcp>
   readonly invocations: Array<Record<string, unknown>>
   readonly sent: Array<Record<string, unknown>>
   readonly states: Array<Record<string, unknown>>
@@ -110,12 +112,13 @@ function harness(agentic: Partial<AgenticSurfaceAdapterApi>): Harness {
   })
 
   return {
+    bridge: dispose,
     invocations,
     sent,
     states,
     subscribed,
     unsubscribed,
-    dispose,
+    dispose: () => dispose.dispose(),
     socket: () => socket,
     open: () => emit('open', {}),
     close: () => socket?.close(),
@@ -147,6 +150,86 @@ function request(method: string, params: Record<string, unknown>): Record<string
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+it('adopts a verified SDK authority without replacing the MCP socket or session', async () => {
+  const test = await attached()
+  try {
+    test.deliver(
+      request('subscribe', {
+        sessionId: SESSION_ID,
+        consumerId: CONSUMER_ID,
+        action: 'start',
+        target: { scope: 'session' },
+        bindings: [{ channelId: 'trading.orders' }],
+      }),
+    )
+    await vi.waitFor(() => expect(test.subscribed).toEqual(['trading.orders']))
+    const socket = test.socket()
+    const invoke = vi.fn().mockResolvedValue({ value: { verified: true } })
+    const verified = {
+      listSurfaces: () => [{ target: { scope: 'session' }, kind: 'session' }],
+      listEffectiveControls: () => [{ controlId: 'trading.getState' }],
+      invokeAnyGuarded: invoke,
+    } as unknown as AgenticSurfaceAdapterApi
+    test.bridge.replaceAgentic(verified)
+    expect(test.socket()).toBe(socket)
+    expect(test.sent.filter(({ type }) => type === 'attach')).toHaveLength(1)
+    expect(test.unsubscribed).toEqual(['trading.orders'])
+    expect(test.states.at(-1)).toMatchObject({
+      phase: 'connected',
+      sessionId: SESSION_ID,
+      controlCount: 1,
+    })
+    test.deliver(
+      request('call', {
+        sessionId: SESSION_ID,
+        consumerId: CONSUMER_ID,
+        target: { scope: 'session' },
+        controlId: 'trading.getState',
+      }),
+    )
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledOnce())
+    expect(test.invocations).toEqual([])
+  } finally {
+    test.dispose()
+  }
+})
+
+it('does not continue a queued batch across an SDK authority replacement', async () => {
+  const pending = Promise.withResolvers<unknown>()
+  const oldInvoke = vi.fn(() => pending.promise)
+  const test = await attached({
+    invokeAnyGuarded: oldInvoke as unknown as AgenticSurfaceAdapterApi['invokeAnyGuarded'],
+  })
+  try {
+    test.deliver(
+      request('batch', {
+        sessionId: SESSION_ID,
+        consumerId: CONSUMER_ID,
+        calls: [
+          { target: { scope: 'session' }, controlId: 'trading.getState' },
+          { target: { scope: 'session' }, controlId: 'trading.placeOrder' },
+        ],
+      }),
+    )
+    await vi.waitFor(() => expect(oldInvoke).toHaveBeenCalledOnce())
+    const nextInvoke = vi.fn()
+    test.bridge.replaceAgentic({
+      listSurfaces: () => [],
+      listEffectiveControls: () => [],
+      invokeAnyGuarded: nextInvoke,
+    } as unknown as AgenticSurfaceAdapterApi)
+    pending.resolve({ value: {} })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(oldInvoke).toHaveBeenCalledOnce()
+    expect(nextInvoke).not.toHaveBeenCalled()
+    expect(test.sent.filter(({ type }) => type === 'response')).toEqual([])
+  } finally {
+    pending.resolve({ value: {} })
+    test.dispose()
+  }
 })
 
 it('attributes a single call to the calling MCP client, not the browser session', async () => {
@@ -551,5 +634,138 @@ it('stops a batch at its wall-clock budget instead of running every call', async
   } finally {
     test.dispose()
     vi.useRealTimers()
+  }
+})
+
+it('bounds empty and oversized terminal errors without violating the response schema', async () => {
+  for (const error of [
+    new Error(''),
+    Object.assign(new Error('m'.repeat(3_000)), { code: 'c'.repeat(200) }),
+  ]) {
+    const test = await attached({
+      invokeAnyGuarded: (async () => {
+        throw error
+      }) as never,
+    })
+    try {
+      test.deliver(
+        request('call', {
+          sessionId: SESSION_ID,
+          consumerId: CONSUMER_ID,
+          target: { scope: 'session' },
+          controlId: 'trading.getState',
+        }),
+      )
+      await vi.waitFor(() => expect(test.sent.some(({ type }) => type === 'response')).toBe(true))
+      const response = test.sent.find(({ type }) => type === 'response')
+      expect(McpBridgeResponseMessageSchema.safeParse(response).success).toBe(true)
+    } finally {
+      test.dispose()
+    }
+  }
+})
+
+it('does not start calls after the host execution deadline', async () => {
+  const test = await attached()
+  try {
+    test.deliver(
+      request('batch', {
+        sessionId: SESSION_ID,
+        consumerId: CONSUMER_ID,
+        deadlineAt: Date.now() - 1,
+        calls: [{ target: { scope: 'session' }, controlId: 'trading.placeOrder' }],
+      }),
+    )
+    await vi.waitFor(() => expect(test.sent.some(({ type }) => type === 'response')).toBe(true))
+    expect(test.invocations).toHaveLength(0)
+    expect(test.sent.find(({ type }) => type === 'response')?.result).toMatchObject({
+      results: [],
+      stoppedEarly: true,
+      budgetExhausted: true,
+    })
+  } finally {
+    test.dispose()
+  }
+})
+
+it('reports an in-flight deadline as outcome unknown and stops all remaining batch calls', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  let settle: (() => void) | undefined
+  const test = await attached({
+    invokeAnyGuarded: (() =>
+      new Promise((resolve) => {
+        settle = () => resolve({ operationId: 'slow-order', origin: 'mcp', value: {} })
+      })) as never,
+  })
+  try {
+    test.deliver(
+      request('batch', {
+        sessionId: SESSION_ID,
+        consumerId: CONSUMER_ID,
+        deadlineAt: Date.now() + 1_000,
+        stopOnError: false,
+        calls: [
+          {
+            target: { scope: 'session' },
+            controlId: 'trading.placeOrder',
+            requestId: 'slow-order',
+          },
+          { target: { scope: 'session' }, controlId: 'trading.never' },
+        ],
+      }),
+    )
+    await vi.waitFor(() => expect(test.invocations).toHaveLength(1))
+    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.waitFor(() => expect(test.sent.some(({ type }) => type === 'response')).toBe(true))
+    expect(test.sent.find(({ type }) => type === 'response')?.result).toMatchObject({
+      results: [
+        {
+          index: 0,
+          status: 'outcome-unknown',
+          operationId: 'slow-order',
+          error: { code: 'BRIDGE_OUTCOME_UNKNOWN' },
+        },
+      ],
+      stoppedEarly: true,
+      budgetExhausted: true,
+    })
+    settle?.()
+    await Promise.resolve()
+    expect(test.invocations).toHaveLength(1)
+  } finally {
+    test.dispose()
+    settle?.()
+    vi.useRealTimers()
+  }
+})
+
+it('does not continue a batch after the browser socket closes', async () => {
+  let settle: (() => void) | undefined
+  const test = await attached({
+    invokeAnyGuarded: (() =>
+      new Promise((resolve) => {
+        settle = () => resolve({ operationId: 'slow-order', origin: 'mcp', value: {} })
+      })) as never,
+  })
+  try {
+    test.deliver(
+      request('batch', {
+        sessionId: SESSION_ID,
+        consumerId: CONSUMER_ID,
+        stopOnError: false,
+        calls: [
+          { target: { scope: 'session' }, controlId: 'trading.placeOrder' },
+          { target: { scope: 'session' }, controlId: 'trading.never' },
+        ],
+      }),
+    )
+    await vi.waitFor(() => expect(test.invocations).toHaveLength(1))
+    test.close()
+    settle?.()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(test.invocations).toHaveLength(1)
+  } finally {
+    test.dispose()
+    settle?.()
   }
 })

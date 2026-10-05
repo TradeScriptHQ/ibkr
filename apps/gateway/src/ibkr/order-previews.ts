@@ -1,6 +1,5 @@
 import type { IBApi, OrderState } from '@stoqey/ib'
 import { isIbOrderWarning } from './broker-errors.js'
-import type { BridgeConfig } from './config.js'
 import { toIbContract } from './contracts.js'
 import { commissionEstimate, finiteNumber } from './numbers.js'
 import {
@@ -20,7 +19,6 @@ const ORDER_PREVIEW_TIMEOUT_MS = 8000
 export class OrderPreviews {
   constructor(
     private readonly ib: IBApi,
-    private readonly config: BridgeConfig,
     private readonly store: BrokerStateStore,
     private readonly allocateOrderId: () => Promise<number>,
   ) {}
@@ -54,11 +52,6 @@ export class OrderPreviews {
         ...(context.accountId || draft.accountId
           ? []
           : ['No account selected; IBKR default account will be used if available.']),
-        ...(this.config.ibkrMode === 'live' && !this.config.liveOrdersEnabled
-          ? [
-              'Live order placement is disabled until WIDGET_IBKR_ENABLE_LIVE_ORDERS=I_UNDERSTAND is set.',
-            ]
-          : []),
       ],
     }
   }
@@ -127,6 +120,7 @@ export class OrderPreviews {
       parentId: undefined,
       parentType: undefined,
       bracketGroupId: undefined,
+      oca: undefined,
       ocaGroup: undefined,
       ocaType: undefined,
     }

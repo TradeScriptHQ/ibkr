@@ -1,15 +1,13 @@
 import { expect, test } from './support/fixtures.js'
-import { discover, select } from './support/instrument-contracts.js'
+import { FORECAST_SEARCH_ROOT, selectForecastPair } from './support/forecast-contracts.js'
+import { discover, resolveUsStock, select } from './support/instrument-contracts.js'
 import { openTerminalSession } from './support/session.js'
-
-const now = new Date()
-const forecastRoot = `FF ${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}`
 
 for (const instrument of [
   { name: 'mutual fund', root: 'VINIX', asset: 'fund', label: 'Mutual funds', venue: 'FUNDSERV' },
   {
     name: 'ForecastEx',
-    root: forecastRoot,
+    root: FORECAST_SEARCH_ROOT,
     asset: 'event-contract',
     label: 'Forecast contracts',
     venue: 'FORECASTX',
@@ -21,26 +19,29 @@ for (const instrument of [
   }) => {
     test.setTimeout(120_000)
     await openTerminalSession(request)
-    const selected = (
-      await discover(request, instrument.root, instrument.asset, instrument.venue)
-    )[0]!
+    const rows = await discover(request, instrument.root, instrument.asset, instrument.venue)
+    const selected =
+      instrument.asset === 'event-contract' ? selectForecastPair(rows).selected : rows[0]
+    if (!selected?.canonicalSymbol)
+      throw new Error('TWS history contract discovery omitted canonical identity')
+    const apple = await resolveUsStock(request, 'AAPL')
     await page.goto('/')
     const chart = page.getByRole('region', { name: 'IBKR Chart', exact: true })
     const close = chart.getByTestId('chart-ohlc-close-value')
-    await page
-      .getByRole('region', { name: 'Markets', exact: true })
-      .getByText('AAPL', { exact: true })
-      .click({ timeout: 60_000 })
+    await select(page, 'AAPL', 'Stocks', apple, { navigate: false, chooseExchange: false })
     await expect(close).toHaveText(/\d/, { timeout: 45_000 })
 
     const unavailableResponse = page.waitForResponse((response) => {
       const url = new URL(response.url())
       return (
         url.pathname.endsWith('/bars') &&
-        url.searchParams.get('symbol') === selected.canonicalSymbol
+        url.searchParams.get('symbol') === selected.canonicalSymbol &&
+        url.searchParams.get('assetClass') === selected.type &&
+        url.searchParams.get('exchange') === selected.exchange &&
+        url.searchParams.get('currency') === selected.currency
       )
     })
-    await select(page, selected.canonicalSymbol!, instrument.label, selected)
+    await select(page, selected.canonicalSymbol, instrument.label, selected, { navigate: false })
     const response = await unavailableResponse
     expect(response.ok()).toBe(true)
     expect(await response.json()).toMatchObject({ bars: [], dataUnavailable: true })
@@ -53,12 +54,16 @@ for (const instrument of [
 
     const populatedResponse = page.waitForResponse((response) => {
       const url = new URL(response.url())
-      return url.pathname.endsWith('/bars') && url.searchParams.get('symbol') === 'AAPL'
+      return (
+        url.pathname.endsWith('/bars') &&
+        url.searchParams.get('symbol') === (apple.brokerSymbol ?? apple.ticker) &&
+        url.searchParams.get('assetClass') === apple.type &&
+        url.searchParams.get('exchange') === apple.exchange &&
+        url.searchParams.get('primaryExchange') === apple.primaryExchange &&
+        url.searchParams.get('currency') === apple.currency
+      )
     })
-    await page
-      .getByRole('region', { name: 'Markets', exact: true })
-      .getByText('AAPL', { exact: true })
-      .click()
+    await select(page, 'AAPL', 'Stocks', apple, { navigate: false, chooseExchange: false })
     const populated = await populatedResponse
     expect(populated.ok()).toBe(true)
     expect((await populated.json()).bars.length).toBeGreaterThan(0)

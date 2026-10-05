@@ -1,6 +1,7 @@
 import type { OptionChainResult } from '@ibkr-terminal/contracts'
-import type { TradingOptionContract, TradingOrderDraft } from '@tradescript/pro/sdk'
+import type { TradingOrderDraft } from '@tradescript/pro/sdk'
 import { expect, test } from './support/fixtures.js'
+import { readExplicitOptionCatalog, toNativeSdkOptionContract } from './support/option-catalog.js'
 import {
   accepted,
   cleanUp,
@@ -109,26 +110,35 @@ test.describe('paper TWS through the mounted SDK @paper', () => {
           test.setTimeout(180_000)
           if (type === 'market') await requireRegularSession(request)
           const reference = await stockReference(request)
-          const catalog = (await expectJsonOk(
-            await request.get(
-              '/api/v1/ibkr/options/chain?underlying=AAPL&exchange=SMART&currency=USD&maxQuoteContracts=2',
-              { headers: browserHeaders, timeout: 90_000 },
-            ),
-          )) as OptionChainResult
-          const expiry = catalog.expirations.find(
-            (e) => Date.parse(e.expiration) > Date.now() + 4 * 86400_000,
-          )?.expiration
-          expect(expiry).toBeTruthy()
+          const query = new URLSearchParams({
+            underlying: 'AAPL',
+            exchange: 'SMART',
+            currency: 'USD',
+            centerPrice: String(reference),
+            maxQuoteContracts: '2',
+          })
+          const { selection } = await readExplicitOptionCatalog(request, query, {
+            notBefore: Date.now() + 4 * 86400_000,
+          })
+          query.set('tradingClass', selection.tradingClass)
+          query.set('expiration', selection.expiration)
+          query.set('quoteWindowRows', '8')
+          query.set('maxQuoteContracts', '16')
+          test.info().annotations.push({
+            type: 'option-api-boundary',
+            description:
+              'Programmatic SDK draft preserves a provider-qualified native ID and tuple; installed SDK widget class selection/rendering remains unqualified under H13.',
+          })
           let entries: OptionChainResult['expirations'][number]['contracts'] = []
           await expect
             .poll(
               async () => {
-                const chain = (await expectJsonOk(
-                  await request.get(
-                    `/api/v1/ibkr/options/chain?underlying=AAPL&exchange=SMART&currency=USD&expiration=${expiry}&centerPrice=${reference}&quoteWindowRows=8&maxQuoteContracts=16`,
-                    { headers: browserHeaders, timeout: 90_000 },
-                  ),
-                )) as OptionChainResult
+                const chain = await expectJsonOk<OptionChainResult>(
+                  await request.get(`/api/v1/ibkr/options/chain?${query}`, {
+                    headers: browserHeaders,
+                    timeout: 90_000,
+                  }),
+                )
                 entries = chain.expirations
                   .flatMap((e) => e.contracts)
                   .filter(
@@ -146,24 +156,6 @@ test.describe('paper TWS through the mounted SDK @paper', () => {
             .toBeGreaterThanOrEqual(2)
           const first = entries[0]!
           const second = entries[1]!
-          const asContract = (entry: typeof first): TradingOptionContract => ({
-            underlying: entry.contract.underlying,
-            expiration: entry.contract.expiration,
-            strike: entry.contract.strike,
-            right: entry.contract.right,
-            multiplier: entry.contract.multiplier,
-            underlyingSymbolInfo: symbol,
-            ...(entry.contract.exchange !== undefined ? { exchange: entry.contract.exchange } : {}),
-            ...(entry.contract.route !== undefined ? { route: entry.contract.route } : {}),
-            ...(entry.contract.currency !== undefined ? { currency: entry.contract.currency } : {}),
-            ...(entry.contract.symbol !== undefined ? { symbol: entry.contract.symbol } : {}),
-            ...(entry.contract.brokerContractId !== undefined
-              ? { brokerContractId: entry.contract.brokerContractId }
-              : {}),
-            ...(entry.contract.priceStep !== undefined
-              ? { priceStep: entry.contract.priceStep }
-              : {}),
-          })
           const primary = type === 'vertical' && right === 'put' ? second : first
           const other = primary === first ? second : first
           const mid = (entry: typeof first) => (entry.bid! + entry.ask!) / 2
@@ -180,7 +172,7 @@ test.describe('paper TWS through the mounted SDK @paper', () => {
             ...(type === 'market' ? {} : { price }),
             optionLegs: [
               {
-                contract: asContract(primary),
+                contract: toNativeSdkOptionContract(primary, symbol),
                 side,
                 positionEffect: 'open',
                 quantity: 1,
@@ -190,7 +182,7 @@ test.describe('paper TWS through the mounted SDK @paper', () => {
               ...(type === 'vertical'
                 ? [
                     {
-                      contract: asContract(other),
+                      contract: toNativeSdkOptionContract(other, symbol),
                       side: side === 'buy' ? ('sell' as const) : ('buy' as const),
                       positionEffect: 'open' as const,
                       quantity: 1,

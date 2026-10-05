@@ -1,4 +1,4 @@
-# TradeScript IBKR Terminal
+# IBKR Tradescript Terminal
 
 A local trading workstation for Interactive Brokers TWS, with a browser interface,
 a macOS/Windows desktop app, and optional access from your own AI client.

@@ -69,7 +69,7 @@ export function createTradeScriptMcpServer(consumerId: string, bridge: BrowserBr
     {
       capabilities: { resources: { listChanged: true } },
       instructions:
-        'Read tradescript://sessions, choose an attached session and explicit target, then discover exact controls before calling them. Carry current expectedRevisions for mutations. Trading is constrained to the terminal paper account and host risk policy.',
+        'Read tradescript://sessions, choose an attached session and explicit target, then discover exact controls before calling them. Carry current expectedRevisions for mutations. Before financial mutations, read the current context and verify executionEnvironment, the selected account, and the effective risk policy; the bridge does not promise paper execution. A timeout or disconnect can leave a call outcome unknown: reconcile its receipt and actual trading state before retrying.',
     },
   )
 
@@ -152,7 +152,7 @@ export function createTradeScriptMcpServer(consumerId: string, bridge: BrowserBr
     {
       title: 'Batch TradeScript controls',
       description:
-        'Run up to 64 ordered SDK controls. The batch is non-atomic and can stop on the first rejected call.',
+        'Run up to 64 ordered SDK controls within a 120s execution deadline. The batch is non-atomic and can stop on the first rejected call. An unknown in-flight outcome always stops the remaining calls; reconcile receipts and trading state before retrying.',
       inputSchema: {
         sessionId,
         calls: z.array(z.object(callShape).strict()).min(1).max(64),

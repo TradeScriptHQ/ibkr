@@ -6,8 +6,9 @@ import type {
 import { type APIRequestContext, type APIResponse, expect } from '@playwright/test'
 
 import { assertPaperConnection } from './paper-connection.js'
+import { TERMINAL_ORIGIN } from './terminal-origin.js'
 
-export const TERMINAL_ORIGIN = 'http://localhost:3000'
+export { TERMINAL_ORIGIN } from './terminal-origin.js'
 
 export const browserHeaders = {
   origin: TERMINAL_ORIGIN,

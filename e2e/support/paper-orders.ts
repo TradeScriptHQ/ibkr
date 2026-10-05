@@ -1,9 +1,16 @@
-import type { BrokerState, BrokerSymbol, MarketQuote, Order } from '@ibkr-terminal/contracts'
+import type {
+  BrokerState,
+  BrokerSymbol,
+  MarketQuote,
+  MarketSessionInfo,
+  Order,
+} from '@ibkr-terminal/contracts'
 import type { APIRequestContext, Page } from '@playwright/test'
 import type { TradingOrderDraft } from '@tradescript/pro/sdk'
 import { expect, test } from './fixtures.js'
 import { ownsOrder } from './order-safety.js'
 import { assetCloseDraft, optionCloseDraft, remainingOwnedFill } from './paper-cleanup.js'
+import { requireKnownSessionState } from './paper-session.js'
 import { browserHeaders, expectJsonOk, readBrokerState as readState } from './session.js'
 
 const symbol = {
@@ -225,7 +232,9 @@ async function cancelOrderFamily(
         const state = await trading.getState()
         if (!state.activeAccountId) throw new Error('The SDK has no active paper account')
         const order = state.orders.find((order) => order.id === id)
-        if (!order) throw new Error('The SDK order is missing before cancellation')
+        // Cancelling a parent may already have cancelled its linked child at TWS.
+        // The final gateway absence poll still verifies that the family is gone.
+        if (!order) return
         if (order.symbol.currency !== symbol.currency)
           throw new Error('Order currency changed before cancellation')
         await trading.cancelOrder(id, {
@@ -359,12 +368,13 @@ function positionQuantities(state: BrokerState) {
   )
 }
 async function requireRegularSession(request: APIRequestContext): Promise<void> {
-  const session = await (
+  const session = await expectJsonOk<MarketSessionInfo>(
     await request.get(
       '/api/v1/ibkr/sessions?symbol=AAPL&exchange=SMART&primaryExchange=NASDAQ&currency=USD&assetClass=stock',
       { headers: browserHeaders },
-    )
-  ).json()
+    ),
+  )
+  requireKnownSessionState(session)
   test.skip(
     session.currentState !== 'regular',
     `Execution requires the regular session; TWS reports ${session.currentState}.`,

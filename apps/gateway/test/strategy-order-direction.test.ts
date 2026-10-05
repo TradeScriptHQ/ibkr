@@ -19,6 +19,7 @@ it.each([
       placeOrder: vi.fn(),
       reqIds: vi.fn(),
       reqOpenOrders: vi.fn(),
+      reqAllOpenOrders: vi.fn(),
     })
     const store = new BrokerStateStore()
     store.setConnectionStatus('connected')
@@ -112,6 +113,6 @@ it.each([
       status: 'working',
     })
     expect(store.getState().ordersHistory?.some((order) => order.id === '100')).toBe(false)
-    expect(ib.reqOpenOrders).toHaveBeenCalledOnce()
+    expect(ib.reqAllOpenOrders).toHaveBeenCalledOnce()
   },
 )

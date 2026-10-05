@@ -1,5 +1,11 @@
-import type { RequirementStatus, SystemStatusResponse } from '@ibkr-terminal/contracts'
+import {
+  connectionTypeLabel,
+  inferConnectionType,
+  type RequirementStatus,
+  type SystemStatusResponse,
+} from '@ibkr-terminal/contracts'
 import type { GatewayConfig } from './config.js'
+import { accountsMatchExecutionEnvironment } from './connections/account-environment.js'
 import type { TwsSessionSnapshot } from './tws/tws-session.js'
 
 export interface RuntimeReadiness {
@@ -27,6 +33,9 @@ export function buildSystemStatus(
   const accountMatched = tws.matchedAccountIds.length > 0
   const twsReady = tws.state === 'ready' && tws.reconciliationComplete
   const runtimeCredentials = config.tradescript.runtimeCredentialsConfigured
+  const connectionLabel = connectionTypeLabel(
+    config.ibkr.connectionType ?? inferConnectionType(config.ibkr.port),
+  )
 
   const requirements: RequirementStatus[] = [
     requirement(
@@ -58,21 +67,24 @@ export function buildSystemStatus(
         : 'The audit ledger is unavailable; financial actions are blocked.',
       true,
     ),
-    requirement(
-      'tws-session',
-      `TWS ${config.ibkr.executionEnvironment} session`,
-      tws.state === 'ready' ? 'ready' : tws.state,
-      tws.message,
-      true,
-    ),
+    {
+      ...requirement(
+        'tws-session',
+        `${connectionLabel} ${config.ibkr.executionEnvironment} session`,
+        tws.state === 'ready' ? 'ready' : tws.state,
+        tws.message,
+        true,
+      ),
+      connection: tws.connection,
+    },
     requirement(
       'paper-account',
       `Allowed ${config.ibkr.executionEnvironment} account`,
       accountMatched ? 'ready' : 'setup-required',
       accountMatched
-        ? 'The connected TWS session contains an allowlisted account.'
+        ? `The connected ${connectionLabel} session contains an allowlisted account.`
         : accountAllowlistConfigured
-          ? 'No connected TWS account matches the configured allowlist.'
+          ? `No connected ${connectionLabel} account matches the configured allowlist.`
           : 'Choose the allowed accounts in Connection settings.',
       true,
     ),
@@ -87,12 +99,13 @@ export function buildSystemStatus(
     ),
   ]
 
-  const connectionReady = twsReady && accountMatched && runtime.auditDatabaseReady
-  const tradingEnabled =
-    connectionReady &&
-    (config.ibkr.tradingEnabled ??
-      (config.ibkr.executionEnvironment === 'paper' || config.ibkr.liveOrdersEnabled))
+  const connectionReady =
+    twsReady &&
+    accountMatched &&
+    runtime.auditDatabaseReady &&
+    accountsMatchExecutionEnvironment(tws.managedAccountIds, config.ibkr.executionEnvironment)
   const ready = connectionReady && runtime.sdkInstalled && runtime.leaseReady && runtimeCredentials
+  const tradingEnabled = ready
 
   return {
     service: 'ibkr-trading-gateway',

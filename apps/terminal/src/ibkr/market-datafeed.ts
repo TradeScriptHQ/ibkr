@@ -34,7 +34,6 @@ import {
   backendQuoteMatches,
   intervalToMs,
   sessionRequestKey,
-  symbolKey,
   toMarketDepth,
   toQuote,
   toSymbolInfo,
@@ -313,10 +312,12 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
     },
 
     async getOptionContracts(request): Promise<OptionSeriesSnapshot> {
-      return getOptionSeries(baseUrl, request.symbol, request.expiration).catch((error) => {
-        console.error(`IBKR option catalog failed: ${diagnosticMessage(error)}`)
-        throw error
-      })
+      return getOptionSeries(baseUrl, request.symbol, request.expiration, request).catch(
+        (error) => {
+          console.error(`IBKR option catalog failed: ${diagnosticMessage(error)}`)
+          throw error
+        },
+      )
     },
 
     async getOptionQuotes(request): Promise<OptionSeriesSnapshot> {
@@ -339,6 +340,26 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
       let streamLive = false
       let fallbackActive = false
       let fallbackTimer: ReturnType<typeof setTimeout> | undefined
+      let freshnessTimer: ReturnType<typeof setTimeout> | undefined
+      const publishSnapshot = (snapshot: OptionSeriesSnapshot) => {
+        if (closed) return
+        if (freshnessTimer !== undefined) clearTimeout(freshnessTimer)
+        callback(snapshot)
+        const lastUpdate = snapshot.quote_freshness.last_update
+        const remaining = 15_000 - Math.max(0, Date.now() - lastUpdate)
+        if (lastUpdate > 0 && remaining > 0) {
+          freshnessTimer = setTimeout(() => {
+            publishSnapshot({
+              ...snapshot,
+              quote_freshness: {
+                ...snapshot.quote_freshness,
+                age_ms: Math.max(0, Date.now() - lastUpdate),
+                status: 'stale',
+              },
+            })
+          }, remaining)
+        }
+      }
       const fallback = async () => {
         if (closed || streamLive) return
         fallbackActive = true
@@ -349,7 +370,7 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
             subscription.expiration,
             subscription,
           )
-          if (!closed && !streamLive) callback(snapshot)
+          if (!closed && !streamLive) publishSnapshot(snapshot)
         } catch {
           // EventSource reconnect and the next bounded snapshot retry remain authoritative.
         } finally {
@@ -360,7 +381,7 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
         streamLive = true
         if (fallbackTimer !== undefined) clearTimeout(fallbackTimer)
         const chain = JSON.parse(event.data) as BackendOptionChainResult
-        callback(toOptionSeriesSnapshot(chain, endpoint))
+        publishSnapshot(toOptionSeriesSnapshot(chain, endpoint))
       }
       const handleError = () => {
         if (!closed && !streamLive && !fallbackActive) void fallback()
@@ -370,6 +391,7 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
       return () => {
         closed = true
         if (fallbackTimer !== undefined) clearTimeout(fallbackTimer)
+        if (freshnessTimer !== undefined) clearTimeout(freshnessTimer)
         source.removeEventListener('option-quotes', handle)
         source.removeEventListener('error', handleError)
         source.close()
@@ -407,6 +429,30 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
       let currentDepth: BackendMarketDepth | undefined
       let currentQuote: BackendQuote | undefined
       let expiryTimer: ReturnType<typeof setTimeout> | undefined
+      let retryTimer: ReturnType<typeof setTimeout> | undefined
+      let retryDelay = 500
+      let refreshing = false
+      let connected = true
+      let generation = 0
+      const unavailable = (status: 'failed' | 'stale', reason: string) => {
+        currentDepth = undefined
+        currentQuote = undefined
+        if (expiryTimer) clearTimeout(expiryTimer)
+        if (closed) return
+        callback({
+          symbol: subscription.symbol,
+          bids: [],
+          asks: [],
+          status,
+          diagnostic: { provider: 'IBKR', reason },
+          quality: {
+            mode: 'snapshot',
+            observedAt: Date.now(),
+            continuity: 'unverified',
+            resync: 'required',
+          },
+        })
+      }
       const publish = () => {
         if (closed || !currentDepth) return
         if (expiryTimer) clearTimeout(expiryTimer)
@@ -424,7 +470,38 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
         if (remaining > 0) expiryTimer = setTimeout(publish, remaining)
       }
       const handleMessage = (event: MessageEvent<string>) => {
+        if (event.type === 'open') {
+          generation += 1
+          void refresh()
+          return
+        }
         const payload = JSON.parse(event.data) as BackendEvent
+        if (payload.type === 'connection-status') {
+          generation += 1
+          connected = payload.status === 'connected'
+          if (connected) void refresh()
+          else {
+            if (retryTimer) clearTimeout(retryTimer)
+            unavailable(
+              'stale',
+              payload.message ?? 'Broker depth disconnected; waiting for recovery.',
+            )
+          }
+          return
+        }
+        if (payload.type === 'state' && payload.state.connectionStatus !== 'connected') {
+          generation += 1
+          connected = false
+          if (retryTimer) clearTimeout(retryTimer)
+          unavailable('stale', 'Broker depth disconnected; waiting for recovery.')
+          return
+        }
+        if (payload.type === 'state' && !connected) {
+          generation += 1
+          connected = true
+          void refresh()
+        }
+        if (!connected) return
         const depth =
           payload.type === 'market-depth'
             ? payload.marketDepth
@@ -449,31 +526,53 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
         if (quote) currentQuote = quote
         if (currentDepth) publish()
       }
-      void Promise.all([
-        get<BackendMarketDepth>(
-          baseUrl,
-          `/depth?${new URLSearchParams({
-            symbol: subscription.symbol.brokerSymbol ?? subscription.symbol.ticker,
-            levels: String(subscription.levels ?? 20),
-            ...(subscription.symbol.exchange ? { exchange: subscription.symbol.exchange } : {}),
-            ...(subscription.symbol.listedExchange
-              ? { primaryExchange: subscription.symbol.listedExchange }
-              : {}),
-            ...(subscription.symbol.currency ? { currency: subscription.symbol.currency } : {}),
-            ...(subscription.symbol.type ? { assetClass: subscription.symbol.type } : {}),
-          }).toString()}`,
-        ),
-        getBackendQuotes(baseUrl, [subscription.symbol]),
-      ]).then(([depth, quotes]) => {
-        if (closed) return
-        currentDepth = depth
-        currentQuote = quotes[0]
-        publish()
-      })
-      const unsubscribe = subscribeEvents(['state', 'market-depth', 'quotes'], handleMessage)
+      const refresh = async () => {
+        if (closed || !connected || refreshing) return
+        refreshing = true
+        const requestGeneration = generation
+        if (retryTimer) clearTimeout(retryTimer)
+        try {
+          const [depth, quotes] = await Promise.all([
+            get<BackendMarketDepth | undefined>(
+              baseUrl,
+              `/depth?${new URLSearchParams({
+                symbol: subscription.symbol.brokerSymbol ?? subscription.symbol.ticker,
+                levels: String(subscription.levels ?? 20),
+                ...(subscription.symbol.exchange ? { exchange: subscription.symbol.exchange } : {}),
+                ...(subscription.symbol.listedExchange
+                  ? { primaryExchange: subscription.symbol.listedExchange }
+                  : {}),
+                ...(subscription.symbol.currency ? { currency: subscription.symbol.currency } : {}),
+                ...(subscription.symbol.type ? { assetClass: subscription.symbol.type } : {}),
+              }).toString()}`,
+            ),
+            getBackendQuotes(baseUrl, [subscription.symbol]).catch(() => []),
+          ])
+          if (closed || requestGeneration !== generation) return
+          if (!depth) throw new Error('IBKR did not return a market-depth snapshot.')
+          currentDepth = depth
+          currentQuote = quotes.find((quote) => backendQuoteMatches(quote, subscription.symbol))
+          retryDelay = 500
+          publish()
+        } catch (error) {
+          if (closed || requestGeneration !== generation) return
+          unavailable('failed', diagnosticMessage(error))
+          retryTimer = setTimeout(() => void refresh(), retryDelay)
+          retryDelay = Math.min(4_000, retryDelay * 2)
+        } finally {
+          refreshing = false
+          if (!closed && connected && requestGeneration !== generation) void refresh()
+        }
+      }
+      const unsubscribe = subscribeEvents(
+        ['open', 'connection-status', 'state', 'market-depth', 'quotes'],
+        handleMessage,
+      )
+      void refresh()
       return () => {
         closed = true
         if (expiryTimer) clearTimeout(expiryTimer)
+        if (retryTimer) clearTimeout(retryTimer)
         unsubscribe()
       }
     },
@@ -489,10 +588,15 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
       let disposed = false
       let lastSequence = 0
       let first = true
+      let timer: number | undefined
       const poll = async () => {
         try {
           const prints = await getTimeAndSales(baseUrl, subscription)
-          const next = first
+          const newestSequence = Math.max(0, ...prints.map((print) => print.sequence ?? 0))
+          const reset = !first && newestSequence > 0 && newestSequence < lastSequence
+          const snapshot = first || reset
+          if (reset) lastSequence = 0
+          const next = snapshot
             ? prints
             : prints.filter((print) => (print.sequence ?? 0) > lastSequence)
           if (next.length > 0 && !disposed) {
@@ -500,17 +604,20 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
             callback({
               symbol: subscription.symbol,
               prints: next,
-              snapshot: first,
+              snapshot,
             })
           }
           first = false
+        } catch (error) {
+          console.warn(`IBKR time and sales refresh failed: ${diagnosticMessage(error)}`)
         } finally {
-          if (!disposed) window.setTimeout(poll, 750)
+          if (!disposed) timer = window.setTimeout(poll, 750)
         }
       }
       void poll()
       return () => {
         disposed = true
+        if (timer !== undefined) window.clearTimeout(timer)
       }
     },
 
@@ -529,20 +636,18 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
           .map((quote) => Number(quote.bidAskSource?.expiresAt) - now)
         if (expiries.length) expiryTimer = setTimeout(publish, Math.max(1, Math.min(...expiries)))
       }
-      const symbolKeys = new Set(subscription.symbols.map(symbolKey))
-      const requestedSymbols = new Map(
-        subscription.symbols
-          .filter((symbol): symbol is SymbolInfo => typeof symbol !== 'string')
-          .map((symbol) => [symbol.ticker.toUpperCase(), symbol]),
-      )
-      void getQuotes(baseUrl, subscription.symbols)
-        .then((quotes) => {
-          if (!closed) {
-            rawQuotes = quotes
-            publish()
-          }
-        })
-        .catch(() => undefined)
+      const refreshQuotes = () => {
+        void getQuotes(baseUrl, subscription.symbols)
+          .then((quotes) => {
+            if (!closed) {
+              rawQuotes = quotes
+              publish()
+            }
+          })
+          .catch(() => undefined)
+      }
+      refreshQuotes()
+      const refreshTimer = setInterval(refreshQuotes, 15_000)
 
       const handleMessage = (event: MessageEvent<string>) => {
         const payload = JSON.parse(event.data) as BackendEvent
@@ -553,18 +658,28 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
               ? (payload.state.quotes ?? [])
               : []
         const quotes = backendQuotes
+          .filter((quote) =>
+            subscription.symbols.some((symbol) =>
+              typeof symbol === 'string'
+                ? quote.symbol.symbol.toUpperCase() === symbol.toUpperCase()
+                : backendQuoteMatches(quote, symbol),
+            ),
+          )
           .map((quote) => {
             const mapped = toQuote(quote)
-            const requested = requestedSymbols.get(quote.symbol.symbol.toUpperCase())
+            const requested = subscription.symbols.find(
+              (symbol): symbol is SymbolInfo =>
+                typeof symbol !== 'string' && backendQuoteMatches(quote, symbol),
+            )
             return requested ? { ...mapped, symbol: requested } : mapped
           })
-          .filter((quote) => symbolKeys.has(symbolKey(quote.symbol)))
         if (quotes.length > 0) rawQuotes = quotes
         publish()
       }
       const unsubscribe = subscribeEvents(['state', 'quotes', 'market-depth'], handleMessage)
       return () => {
         closed = true
+        clearInterval(refreshTimer)
         if (expiryTimer) clearTimeout(expiryTimer)
         unsubscribe()
       }
@@ -581,6 +696,10 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
       let timer: number | undefined
       const refreshMs =
         intervalToMs(subscription.interval) <= 30_000 ? Math.max(pollMs, 16_000) : pollMs
+      const pollBarCount = Math.max(
+        10,
+        Math.ceil(refreshMs / intervalToMs(subscription.interval)) + 2,
+      )
 
       // The order ticket consumes this same quote stream. Apply its latest trade only to the
       // unfinished matching bar; historical polling remains authoritative for completed candles.
@@ -619,9 +738,9 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
       const poll = async () => {
         try {
           const result = await loadBars(baseUrl, subscription.symbol, subscription.interval, {
-            startTime: Date.now() - intervalToMs(subscription.interval) * 10,
+            startTime: Date.now() - intervalToMs(subscription.interval) * pollBarCount,
             endTime: Date.now(),
-            barCount: 10,
+            barCount: pollBarCount,
             loadDirection: 'newer',
           })
           for (const nextBar of result.bars) {
@@ -674,6 +793,9 @@ function developBarFromQuote(
   quote: DevelopingQuote,
   interval: ChartInterval,
 ): Bar | undefined {
+  // Calendar and trading-session boundaries are provider facts. A fixed duration cannot prove
+  // that a daily/weekly/monthly candle remains unfinished, so leave those candles authoritative.
+  if (/[DWM]$/.test(interval)) return undefined
   const endTime = bar.time + intervalToMs(interval)
   if (quote.timestamp < bar.time || quote.timestamp >= endTime) return undefined
   return {

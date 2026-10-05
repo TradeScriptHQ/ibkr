@@ -9,6 +9,7 @@ import {
   type SecType,
   WhatToShow,
 } from '@stoqey/ib'
+import { OrderIdAllocator } from '../tws/order-id-allocator.js'
 import { subscribeHistoricalSchedule } from './historical-schedule-event.js'
 import {
   formatIbDateTime,
@@ -19,13 +20,11 @@ import {
 import type { IbSecDefOptionParameters } from './option-chain.js'
 import { RequestError } from './request-error.js'
 import {
-  addDays,
   normalizeIbDateKey,
   normalizeIbTimezone,
   type ParsedSchedule,
   parseIbHistoricalScheduleDateTime,
   zonedDateKey,
-  zonedTimeToUtc,
 } from './session-calendar.js'
 import type { MarketBar } from './types.js'
 
@@ -41,7 +40,6 @@ const SMALL_BAR_BURST_LIMIT = 5
 
 /** Owns request IDs and the callback lifetime of finite IBKR queries. */
 export class IbkrRequests {
-  private nextRequestId = 9200
   private readonly marketRuleCache = new Map<number, Promise<PriceIncrement[]>>()
   private readonly smallBarRequests: Array<{
     at: number
@@ -51,10 +49,14 @@ export class IbkrRequests {
   constructor(
     private readonly ib: IBApi,
     private readonly isConnected: () => boolean,
+    private readonly ids = new OrderIdAllocator(),
   ) {}
   allocateRequestId(): number {
-    this.nextRequestId += 1
-    return this.nextRequestId
+    return this.ids.allocateRequestId()
+  }
+
+  ownsRequestId(requestId: number): boolean {
+    return this.ids.ownsRequestId(requestId)
   }
 
   requestContractDetails(
@@ -215,14 +217,20 @@ export class IbkrRequests {
       const onMarketRule = (eventMarketRuleId: number, values: unknown[]) => {
         if (eventMarketRuleId !== marketRuleId) return
         cleanup()
-        const increments = values
-          .filter(isPriceIncrement)
-          .sort((left, right) => left.lowEdge - right.lowEdge)
-        if (!increments.length) {
-          reject(new RequestError(502, `IBKR market rule ${marketRuleId} returned no increments`))
+        if (
+          !values.length ||
+          !values.every(isPriceIncrement) ||
+          values.some((value, index) => index > 0 && value.lowEdge <= values[index - 1]!.lowEdge)
+        ) {
+          reject(
+            new RequestError(
+              502,
+              `IBKR market rule ${marketRuleId} returned an invalid increment ladder`,
+            ),
+          )
           return
         }
-        resolve(increments)
+        resolve(values)
       }
       const cleanup = () => {
         clearTimeout(timeout)
@@ -291,6 +299,10 @@ export class IbkrRequests {
         if (eventReqId !== reqId) return
         this.ib.cancelHistoricalData(reqId)
         cleanup()
+        if (code === 162 && /\bHMDS query returned no data\b/i.test(error.message)) {
+          resolve([])
+          return
+        }
         const suffix = code ? ` (${code})` : ''
         reject(new RequestError(historicalErrorStatus(error, code), `${error.message}${suffix}`))
       }
@@ -371,21 +383,9 @@ export class IbkrRequests {
               : [{ dateKey: dateKey ?? zonedDateKey(opensAt, timezone), opensAt, closesAt }]
           })
           .sort((left, right) => left.opensAt - right.opensAt)
-        const referenceDateKeys = sessions
-          .map((session) => normalizeIbDateKey(session.refDate))
-          .filter((key): key is string => key !== undefined)
-          .sort()
-        const firstReferenceDate = referenceDateKeys[0]
-        const lastReferenceDate = referenceDateKeys.at(-1)
-        const calendarStartTime = firstReferenceDate
-          ? zonedTimeToUtc(firstReferenceDate, '0000', timezone)
-          : resolvedStartTime
-        const calendarEndTime = lastReferenceDate
-          ? zonedTimeToUtc(addDays(lastReferenceDate, 1), '0000', timezone)
-          : resolvedEndTime
         resolve({
-          startTime: Math.min(resolvedStartTime, calendarStartTime),
-          endTime: Math.max(resolvedEndTime, calendarEndTime),
+          startTime: resolvedStartTime,
+          endTime: resolvedEndTime,
           timezone,
           windows,
         })

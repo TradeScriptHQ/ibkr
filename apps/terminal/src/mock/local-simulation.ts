@@ -10,20 +10,24 @@ import type {
   TradingAccount,
   TradingAccountManagerInfo,
   TradingBrokerAdapter,
+  TradingBulkActionOptions,
   TradingEvent,
-  TradingExecution,
   TradingFeatureSet,
   TradingOptionContract,
-  TradingOrder,
-  TradingOrderContext,
-  TradingOrderDraft,
-  TradingOrderPatch,
   TradingPosition,
   TradingState,
 } from '@tradescript/pro/sdk'
+import { MOCK_PROVIDER } from './identity.js'
+import {
+  createSyntheticOrderEngine,
+  exactOptionSymbol,
+  SYNTHETIC_PIP_SIZE,
+  type SyntheticQuoteUpdate,
+} from './order-engine.js'
+
+export { MOCK_PROVIDER }
 
 export const MOCK_ACCOUNT_ID = 'MOCK-PAPER'
-export const MOCK_PROVIDER = 'LOCAL-MOCK'
 
 const STARTING_CASH = 100_000
 const COMMISSION = 1
@@ -38,22 +42,72 @@ const BASE_PRICES: Record<string, number> = {
 export interface LocalSimulation {
   readonly broker: TradingBrokerAdapter
   readonly datafeed: MarketDataFeed
+  /** Advances only this explicitly synthetic local market. */
+  advanceQuote(symbol: SdkSymbolInfo, update: SyntheticQuoteUpdate): void
 }
 
 export interface LocalSimulationOptions {
   readonly now?: () => number
+  readonly maxFillQuantity?: number
   readonly createDefaultAccountManagerInfo?: () => TradingAccountManagerInfo
 }
 
 export function createLocalSimulation(options: LocalSimulationOptions = {}): LocalSimulation {
   const now = options.now ?? Date.now
+  const optionContracts = new Map<string, TradingOptionContract>()
+  const overrides = new Map<string, SyntheticQuoteUpdate>()
+  const listeners = new Set<(symbol: SdkSymbolInfo, quantity?: number) => void>()
+  const datafeed = createMockMarketDatafeed(now, optionContracts, overrides)
+  const market = {
+    quote: (symbol: SdkSymbolInfo) => mockQuote(symbol, now, optionContracts, overrides),
+    subscribe(listener: (symbol: SdkSymbolInfo, quantity?: number) => void) {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
+  }
   return {
-    broker: createMockBroker(now, options.createDefaultAccountManagerInfo),
-    datafeed: createMockMarketDatafeed(now),
+    broker: createMockBroker(
+      now,
+      options.createDefaultAccountManagerInfo,
+      optionContracts,
+      market,
+      options.maxFillQuantity,
+    ),
+    datafeed,
+    advanceQuote(symbol, update) {
+      if (
+        symbol.provider !== MOCK_PROVIDER ||
+        (symbol.type !== 'stock' && symbol.type !== 'option') ||
+        market.quote(symbol).status !== 'ok'
+      )
+        throw new Error('Only an exact available synthetic instrument can advance.')
+      if (
+        ![update.last, update.bid, update.ask].every(
+          (value) => Number.isFinite(value) && value > 0,
+        ) ||
+        update.bid > update.ask ||
+        (update.availableQuantity !== undefined &&
+          (!Number.isInteger(update.availableQuantity) || update.availableQuantity < 0))
+      )
+        throw new Error('Invalid synthetic quote or executable quantity.')
+      overrides.set(instrumentKey(symbol), { ...update })
+      for (const listener of listeners) listener(symbol, update.availableQuantity)
+      for (const contract of optionContracts.values()) {
+        if (instrumentKey(contract.underlyingSymbolInfo) !== instrumentKey(symbol)) continue
+        const exact = exactOptionSymbol(contract)
+        if (!overrides.has(instrumentKey(exact))) for (const listener of listeners) listener(exact)
+      }
+    },
   }
 }
 
-function createMockMarketDatafeed(now: () => number): MarketDataFeed {
+function createMockMarketDatafeed(
+  now: () => number,
+  optionContracts: Map<string, TradingOptionContract>,
+  overrides: Map<string, SyntheticQuoteUpdate>,
+): MarketDataFeed {
   const resolve = (selection: string | SdkSymbolInfo): SdkSymbolInfo => {
     if (typeof selection !== 'string') return selection
     const ticker = selection.toUpperCase()
@@ -70,28 +124,11 @@ function createMockMarketDatafeed(now: () => number): MarketDataFeed {
     }
   }
   const priceFor = (selection: string | SdkSymbolInfo) =>
-    BASE_PRICES[typeof selection === 'string' ? selection.toUpperCase() : selection.ticker] ?? 100
-  const quoteFor = (selection: string | SdkSymbolInfo): Quote => {
-    const symbol = resolve(selection)
-    const last = priceFor(symbol)
-    return {
-      symbol,
-      last,
-      bid: last - 0.05,
-      ask: last + 0.05,
-      spread: 0.1,
-      change: 1.25,
-      changePercent: 0.63,
-      open: last - 1.1,
-      high: last + 1.4,
-      low: last - 1.8,
-      previousClose: last - 1.25,
-      volume: 2_450_000,
-      timestamp: now(),
-      status: 'ok',
-      metadata: { provider: MOCK_PROVIDER, synthetic: true },
-    }
-  }
+    overrides.get(instrumentKey(resolve(selection)))?.last ??
+    BASE_PRICES[typeof selection === 'string' ? selection.toUpperCase() : selection.ticker] ??
+    100
+  const quoteFor = (selection: string | SdkSymbolInfo): Quote =>
+    mockQuote(resolve(selection), now, optionContracts, overrides)
   const depthFor = (symbol: SdkSymbolInfo, levels = 10): SdkMarketDepth => {
     const timestamp = now()
     const last = priceFor(symbol)
@@ -146,8 +183,8 @@ function createMockMarketDatafeed(now: () => number): MarketDataFeed {
         return {
           code: `${symbol.ticker}-${expiration}-${type[0]}-${strike}`,
           underlying_symbol: symbol.ticker,
-          bid_price: round(mark - 0.05),
-          ask_price: round(mark + 0.05),
+          bid_price: round(mark - 0.01),
+          ask_price: round(mark + 0.01),
           last_price: mark,
           implied_volatility: 0.24,
           delta: type === 'CALL' ? 0.5 : -0.5,
@@ -332,7 +369,10 @@ function createMockMarketDatafeed(now: () => number): MarketDataFeed {
 
 function createMockBroker(
   now: () => number,
-  createDefaultAccountManagerInfo?: () => TradingAccountManagerInfo,
+  createDefaultAccountManagerInfo: (() => TradingAccountManagerInfo) | undefined,
+  optionContracts: Map<string, TradingOptionContract>,
+  market: Parameters<typeof createSyntheticOrderEngine>[2],
+  maxFillQuantity: number | undefined,
 ): TradingBrokerAdapter {
   const subscribers = new Set<(event: TradingEvent) => void>()
   let host: Parameters<NonNullable<TradingBrokerAdapter['connect']>>[0] | undefined
@@ -367,17 +407,26 @@ function createMockBroker(
       0,
     )
     const equity = money(cash + marketValue)
+    const grossMarketValue = state.positions.reduce(
+      (sum, position) =>
+        sum +
+        position.quantity *
+          (position.marketPrice ?? position.averagePrice ?? 0) *
+          (position.optionContract?.multiplier ?? 1),
+      0,
+    )
     account.balance = {
       ...account.balance,
       cash: money(cash),
       buyingPower: Math.max(0, equity * 4),
       equity,
-      marginUsed: Math.max(0, Math.abs(marketValue) * 0.25),
+      marginUsed: money(grossMarketValue * 0.25),
       currency: 'USD',
     }
     account.customFields = {
       ...account.customFields,
       availableFunds: account.balance.buyingPower,
+      dailyPnl: money(equity - STARTING_CASH),
     }
     account.pnl = {
       totalPnl: equity - STARTING_CASH,
@@ -393,106 +442,15 @@ function createMockBroker(
       currency: 'USD',
     }
   }
-  const execute = (draft: TradingOrderDraft, context: TradingOrderContext, order: TradingOrder) => {
-    const optionLeg = draft.optionLegs?.[0]
-    const optionContract = optionLeg?.contract
-    const side = optionLeg?.side ?? draft.side
-    const quantity = optionLeg?.quantity ?? draft.quantity
-    const multiplier = optionContract?.multiplier ?? 1
-    const price =
-      optionLeg?.price ??
-      draft.price ??
-      (side === 'buy' ? context.ask : context.bid) ??
-      context.lastPrice
-    if (!Number.isFinite(price) || Number(price) <= 0) {
-      throw new Error('The local simulator requires an explicit positive execution price.')
-    }
-    const fillPrice = Number(price)
-    const key = optionContract ? optionKey(optionContract) : instrumentKey(draft.symbol)
-    const positionIndex = state.positions.findIndex((position) =>
-      position.optionContract
-        ? optionKey(position.optionContract) === key
-        : instrumentKey(position.symbol) === key,
-    )
-    const existing = state.positions[positionIndex]
-    const before = existing ? signedPosition(existing) : 0
-    const delta = side === 'buy' ? quantity : -quantity
-    const after = before + delta
-    const positionId = existing?.id ?? `mock-position-${++sequence}`
-    let realizedPnl = 0
-    if (existing && Math.sign(before) !== Math.sign(delta)) {
-      const closed = Math.min(Math.abs(before), Math.abs(delta))
-      realizedPnl =
-        (before > 0
-          ? fillPrice - Number(existing?.averagePrice)
-          : Number(existing?.averagePrice) - fillPrice) *
-        closed *
-        multiplier
-    }
-    if (after === 0) {
-      if (positionIndex >= 0) state.positions.splice(positionIndex, 1)
-    } else {
-      const increasing = before === 0 || Math.sign(before) === Math.sign(delta)
-      const averagePrice = increasing
-        ? before === 0
-          ? fillPrice
-          : (Math.abs(before) * Number(existing?.averagePrice) + Math.abs(delta) * fillPrice) /
-            Math.abs(after)
-        : Math.sign(before) === Math.sign(after)
-          ? Number(existing?.averagePrice)
-          : fillPrice
-      const positionSymbol = optionContract ? optionSymbol(optionContract) : draft.symbol
-      const position: TradingPosition = {
-        id: positionId,
-        accountId: MOCK_ACCOUNT_ID,
-        symbol: positionSymbol,
-        ...(optionContract ? { optionContract } : {}),
-        side: after > 0 ? 'long' : 'short',
-        quantity: Math.abs(after),
-        averagePrice,
-        marketPrice: fillPrice,
-        actionable: true,
-        priceStep: 0.01,
-        customFields: {
-          marketValue: Math.abs(after) * fillPrice * multiplier,
-          unrealizedPnl: 0,
-          provider: MOCK_PROVIDER,
-          synthetic: true,
-        },
-      }
-      if (positionIndex >= 0) state.positions[positionIndex] = position
-      else state.positions.push(position)
-    }
-    const execution: TradingExecution = {
-      id: `mock-execution-${++sequence}`,
-      accountId: MOCK_ACCOUNT_ID,
-      orderId: order.id,
-      positionId,
-      symbol: optionContract ? optionSymbol(optionContract) : draft.symbol,
-      ...(optionContract ? { optionContract } : {}),
-      side,
-      quantity,
-      price: fillPrice,
-      time: now(),
-      commission: COMMISSION,
-      currency: 'USD',
-      metadata: { provider: MOCK_PROVIDER, synthetic: true, realizedPnl },
-    }
-    state.executions.push(execution)
-    account.balance = {
-      ...account.balance,
-      cash: money(
-        Number(account.balance?.cash ?? STARTING_CASH) -
-          delta * fillPrice * multiplier -
-          COMMISSION,
-      ),
-    }
-    order.status = 'filled'
-    order.filledQuantity = quantity
-    order.remainingQuantity = 0
-    order.averagePrice = fillPrice
-    order.updatedAt = now()
-  }
+  const engine = createSyntheticOrderEngine(
+    state,
+    MOCK_ACCOUNT_ID,
+    market,
+    optionContracts,
+    now,
+    publish,
+    maxFillQuantity,
+  )
 
   const broker: TradingBrokerAdapter = {
     executionEnvironment: 'paper',
@@ -534,6 +492,7 @@ function createMockBroker(
     },
     async getTradingSymbolInfo(context) {
       const isOption = context.symbol.type === 'option'
+      const option = optionContracts.get(context.symbol.brokerSymbol ?? '')
       return {
         symbol: context.symbol,
         ...(context.accountId ? { accountId: context.accountId } : {}),
@@ -543,7 +502,12 @@ function createMockBroker(
         quantityStep: 1,
         minNotional: 1,
         priceStep: 0.01,
-        contractMultiplier: isOption ? 100 : 1,
+        pipSize: SYNTHETIC_PIP_SIZE,
+        ...(isOption
+          ? option
+            ? { contractMultiplier: option.multiplier }
+            : {}
+          : { contractMultiplier: 1 }),
         supportedOrderTypes: isOption
           ? ['market', 'limit']
           : ['market', 'limit', 'stop', 'stop-limit', 'trailing-stop'],
@@ -551,6 +515,17 @@ function createMockBroker(
           { type: 'day', label: 'DAY' },
           { type: 'gtc', label: 'GTC' },
         ],
+        oca: {
+          behaviors: [
+            { value: 'cancel-with-block', label: 'Cancel siblings on fill' },
+            { value: 'reduce-with-block', label: 'Reduce siblings on fill' },
+            {
+              value: 'reduce-without-block',
+              label: 'Reduce siblings on fill (synthetic sequential execution)',
+            },
+          ],
+          defaultBehavior: 'cancel-with-block',
+        },
         supportsMarketBrackets: !isOption,
         supportsMultipleExitLevels: !isOption,
         supportsUnpairedExitLevels: !isOption,
@@ -561,13 +536,46 @@ function createMockBroker(
       }
     },
     async resolveOptionContract(request) {
+      if (request.accountId && request.accountId !== MOCK_ACCOUNT_ID)
+        throw new Error('Unknown synthetic option account.')
+      const source = request.contract
+      if (
+        source.underlyingSymbolInfo.provider !== MOCK_PROVIDER ||
+        source.underlyingSymbolInfo.ticker !== source.underlying ||
+        source.underlyingSymbolInfo.canonicalSymbol !== `mock:${source.underlying}` ||
+        !Number.isFinite(source.strike) ||
+        source.strike <= 0 ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(source.expiration) ||
+        !Number.isFinite(Date.parse(`${source.expiration}T00:00:00Z`)) ||
+        (source.right !== 'call' && source.right !== 'put') ||
+        BASE_PRICES[source.underlying] === undefined ||
+        source.currency !== 'USD' ||
+        source.multiplier !== 100
+      )
+        throw new Error('The exact option contract is unavailable from the local simulator.')
+      const id = String(source.brokerContractId ?? optionKey(source))
+      const contract: TradingOptionContract = {
+        ...source,
+        symbol: source.symbol ?? optionKey(source),
+        brokerContractId: id,
+        exchange: source.exchange ?? 'SMART',
+        route: 'LOCAL',
+        customFields: { ...source.customFields, provider: MOCK_PROVIDER, synthetic: true },
+      }
+      const existing = optionContracts.get(id)
+      if (
+        existing &&
+        (existing.underlying !== contract.underlying ||
+          existing.expiration !== contract.expiration ||
+          existing.strike !== contract.strike ||
+          existing.right !== contract.right ||
+          existing.currency !== contract.currency ||
+          existing.multiplier !== contract.multiplier)
+      )
+        throw new Error('Synthetic option identity conflicts with an existing contract.')
+      optionContracts.set(id, contract)
       return {
-        contract: {
-          ...request.contract,
-          symbol: request.contract.symbol ?? optionKey(request.contract),
-          brokerContractId: request.contract.brokerContractId ?? optionKey(request.contract),
-          route: request.contract.route ?? 'LOCAL',
-        },
+        contract,
         tradable: true,
       }
     },
@@ -579,14 +587,17 @@ function createMockBroker(
       )
     },
     async previewOrder(draft, context) {
-      const unsupported = unsupportedDraftReason(draft)
-      if (unsupported) return { accepted: false, message: unsupported, errors: [unsupported] }
-      const price =
-        draft.optionLegs?.[0]?.price ??
-        draft.price ??
-        context.ask ??
-        context.bid ??
-        context.lastPrice
+      try {
+        engine.validate(draft, context)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return { accepted: false, message, errors: [message] }
+      }
+      const leg = draft.optionLegs?.[0]
+      const quote = leg ? market.quote(exactOptionSymbol(leg.contract)) : undefined
+      const price = leg
+        ? (leg.price ?? draft.price ?? (leg.side === 'buy' ? quote?.ask : quote?.bid))
+        : (draft.price ?? (draft.side === 'buy' ? context.ask : context.bid) ?? context.lastPrice)
       const quantity = draft.optionLegs?.[0]?.quantity ?? draft.quantity
       const multiplier = draft.optionLegs?.[0]?.contract.multiplier ?? 1
       if (!Number.isFinite(price) || Number(price) <= 0) {
@@ -601,78 +612,35 @@ function createMockBroker(
         message: 'Previewed on the synthetic local paper exchange.',
       }
     },
-    async previewModifyOrder(orderId) {
-      return {
-        accepted: state.orders.some((order) => order.id === orderId && order.status === 'working'),
-        confirmId: `mock-modify-${++sequence}`,
+    async previewModifyOrder(orderId, patch, context) {
+      try {
+        engine.previewModify(orderId, patch, context)
+        return { accepted: true, confirmId: `mock-modify-${++sequence}` }
+      } catch (error) {
+        return { accepted: false, message: error instanceof Error ? error.message : String(error) }
       }
     },
     async placeOrder(draft, context) {
-      const unsupported = unsupportedDraftReason(draft)
-      if (unsupported) throw new Error(unsupported)
-      const order: TradingOrder = {
-        id: `mock-order-${++sequence}`,
-        accountId: draft.accountId ?? context.accountId ?? MOCK_ACCOUNT_ID,
-        symbol: draft.symbol,
-        side: draft.side,
-        type: draft.type,
-        status: draft.type === 'market' ? 'filled' : 'working',
-        quantity: draft.quantity,
-        filledQuantity: 0,
-        remainingQuantity: draft.quantity,
-        ...(draft.price === undefined ? {} : { price: draft.price }),
-        ...(draft.stopPrice === undefined ? {} : { stopPrice: draft.stopPrice }),
-        ...(draft.duration === undefined ? {} : { duration: draft.duration }),
-        ...(draft.optionLegs === undefined ? {} : { optionLegs: draft.optionLegs }),
-        ...(draft.strategyLegs === undefined ? {} : { strategyLegs: draft.strategyLegs }),
-        ...(draft.exits === undefined ? {} : { exits: draft.exits }),
-        ...(draft.customFields === undefined ? {} : { customFields: draft.customFields }),
-        createdAt: now(),
-        updatedAt: now(),
-        metadata: { provider: MOCK_PROVIDER, synthetic: true },
-      }
-      if (draft.type === 'market') execute(draft, context, order)
-      state.orders.push(order)
-      state.ordersHistory?.push(structuredClone(order))
-      publish()
-      return {
-        accepted: true,
-        status: order.status === 'filled' ? 'accepted' : 'submitted',
-        order: structuredClone(order),
-        message:
-          order.status === 'filled'
-            ? 'Filled by the synthetic local paper exchange.'
-            : 'Working on the synthetic local paper exchange.',
-      }
+      return engine.place(draft, context)
     },
-    async modifyOrder(orderId, patch: TradingOrderPatch) {
-      const order = state.orders.find((candidate) => candidate.id === orderId)
-      if (order?.status !== 'working') throw new Error(`Working order not found: ${orderId}`)
-      Object.assign(order, patch, { updatedAt: now() })
-      syncOrderHistory(state, order)
-      publish()
-      return structuredClone(order)
+    async modifyOrder(orderId, patch, context) {
+      return engine.modify(orderId, patch, context)
     },
     async cancelOrder(orderId) {
-      const order = state.orders.find((candidate) => candidate.id === orderId)
-      if (order?.status !== 'working') throw new Error(`Working order not found: ${orderId}`)
-      order.status = 'cancelled'
-      order.updatedAt = now()
-      order.remainingQuantity = 0
-      syncOrderHistory(state, order)
-      publish()
+      engine.cancel(orderId)
     },
     async cancelOrders(orderIds, context, financialOptions) {
       for (const orderId of orderIds) await broker.cancelOrder?.(orderId, context, financialOptions)
     },
-    async cancelAllOrders() {
+    async cancelAllOrders(options) {
       let cancelled = 0
       for (const order of state.orders) {
-        if (order.status !== 'working') continue
-        order.status = 'cancelled'
-        order.remainingQuantity = 0
-        order.updatedAt = now()
-        syncOrderHistory(state, order)
+        if (
+          !['working', 'partially-filled', 'inactive'].includes(order.status) ||
+          !inBulkScope(order, options)
+        )
+          continue
+        engine.cancel(order.id)
         cancelled += 1
       }
       publish()
@@ -685,55 +653,39 @@ function createMockBroker(
       }
     },
     async closePosition(positionId, context, options = {}) {
-      const position = state.positions.find((candidate) => candidate.id === positionId)
-      if (!position) throw new Error(`Position not found: ${positionId}`)
-      const quantity = Math.min(options.quantity ?? position.quantity, position.quantity)
-      await broker.placeOrder(
-        {
-          accountId: position.accountId,
-          symbol: position.optionContract?.underlyingSymbolInfo ?? position.symbol,
-          side: position.side === 'long' ? 'sell' : 'buy',
-          type: 'market',
-          quantity,
-          ...(position.optionContract
-            ? {
-                optionLegs: [
-                  {
-                    contract: position.optionContract,
-                    side: position.side === 'long' ? 'sell' : 'buy',
-                    positionEffect: 'close',
-                    quantity,
-                    ratio: 1,
-                    ...(context.lastPrice === undefined ? {} : { price: context.lastPrice }),
-                  },
-                ],
-              }
-            : {}),
-        },
-        context,
-      )
+      engine.close(positionId, context, options.quantity)
     },
-    async reversePosition(positionId, context) {
-      const position = state.positions.find((candidate) => candidate.id === positionId)
-      if (!position) throw new Error(`Position not found: ${positionId}`)
-      await broker.placeOrder(
-        {
-          accountId: position.accountId,
-          symbol: position.symbol,
-          side: position.side === 'long' ? 'sell' : 'buy',
-          type: 'market',
-          quantity: position.quantity * 2,
-        },
-        context,
-      )
+    async modifyPosition(positionId, patch, context) {
+      return engine.modifyPosition(positionId, patch, context)
     },
-    async flattenPositions(contexts) {
-      const positions = [...state.positions]
-      for (const position of positions) {
+    async reversePosition(positionId, context, options) {
+      if (
+        options?.quantity !== undefined &&
+        options.quantity !==
+          state.positions.find((position) => position.id === positionId)?.quantity
+      )
+        throw new Error(
+          'Synthetic partial reversal is unavailable; reverse the full owned position.',
+        )
+      engine.reverse(positionId, context)
+    },
+    async flattenPositions(contexts, options) {
+      const positions = state.positions.filter((position) => inBulkScope(position, options))
+      // This is one simulator-owned bulk operation. Resolve every exact context and executable
+      // close price first so a missing later context cannot leave an earlier position flattened.
+      const plan = positions.map((position) => {
         const context = contexts.find(
-          (candidate) => instrumentKey(candidate.symbol) === instrumentKey(position.symbol),
+          (candidate) =>
+            instrumentKey(candidate.symbol) === instrumentKey(position.symbol) &&
+            (candidate.accountId === undefined || candidate.accountId === position.accountId),
         )
         if (!context) throw new Error(`No price context for ${position.symbol.ticker}`)
+        const price = (position.side === 'long' ? context.bid : context.ask) ?? context.lastPrice
+        if (price === undefined || !Number.isFinite(price) || price <= 0)
+          throw new Error(`No executable price context for ${position.symbol.ticker}`)
+        return { position, context }
+      })
+      for (const { position, context } of plan) {
         await broker.closePosition?.(position.id, context)
       }
       return positions.length
@@ -772,9 +724,14 @@ function mockAccount(): TradingAccount {
       supportsUnpairedExitLevels: true,
       supportsStopLoss: true,
       supportsTrailingStop: true,
-      maxExitLevels: 4,
+      maxExitLevels: 10,
     },
-    customFields: { provider: MOCK_PROVIDER, synthetic: true, availableFunds: STARTING_CASH * 4 },
+    customFields: {
+      provider: MOCK_PROVIDER,
+      synthetic: true,
+      availableFunds: STARTING_CASH * 4,
+      dailyPnl: 0,
+    },
   }
 }
 
@@ -794,23 +751,30 @@ function mockFeatures(): TradingFeatureSet {
   }
 }
 
-function unsupportedDraftReason(draft: TradingOrderDraft): string | undefined {
-  if ((draft.optionLegs?.length ?? 0) > 1 || (draft.strategyLegs?.length ?? 0) > 0) {
-    return 'The local simulator supports single-leg options only; use TWS paper for strategy execution.'
-  }
-  return undefined
+function inBulkScope(
+  record: {
+    accountId?: string
+    symbol: SdkSymbolInfo
+    optionLegs?: Array<{ contract: TradingOptionContract }>
+    optionContract?: TradingOptionContract
+  },
+  options: TradingBulkActionOptions | undefined,
+): boolean {
+  return (
+    (options?.accountId === undefined || record.accountId === options.accountId) &&
+    (options?.symbol === undefined ||
+      instrumentKey(
+        record.optionContract
+          ? exactOptionSymbol(record.optionContract)
+          : record.optionLegs?.[0]
+            ? exactOptionSymbol(record.optionLegs[0].contract)
+            : record.symbol,
+      ) === instrumentKey(options.symbol))
+  )
 }
 
 function signedPosition(position: TradingPosition): number {
   return position.side === 'short' ? -position.quantity : position.quantity
-}
-
-function syncOrderHistory(state: TradingState, order: TradingOrder): void {
-  if (state.ordersHistory === undefined) state.ordersHistory = []
-  const history = state.ordersHistory
-  const index = history.findIndex((candidate) => candidate.id === order.id)
-  if (index >= 0) history[index] = structuredClone(order)
-  else history.push(structuredClone(order))
 }
 
 function instrumentKey(symbol: SdkSymbolInfo): string {
@@ -822,20 +786,6 @@ function optionKey(contract: TradingOptionContract): string {
     contract.symbol ??
     `${contract.underlying}-${contract.expiration}-${contract.right}-${contract.strike}`
   )
-}
-
-function optionSymbol(contract: TradingOptionContract): SdkSymbolInfo {
-  const ticker = optionKey(contract)
-  return {
-    ticker,
-    canonicalSymbol: `mock-option:${ticker}`,
-    brokerSymbol: ticker,
-    exchange: contract.exchange ?? 'SMART',
-    listedExchange: contract.exchange ?? 'SMART',
-    currency: contract.currency ?? 'USD',
-    type: 'option',
-    provider: MOCK_PROVIDER,
-  }
 }
 
 function intervalMilliseconds(interval: ChartInterval): number {
@@ -869,4 +819,58 @@ function round(value: number): number {
 
 function money(value: number): number {
   return Math.round(value * 100) / 100
+}
+
+function mockQuote(
+  symbol: SdkSymbolInfo,
+  now: () => number,
+  optionContracts: Map<string, TradingOptionContract>,
+  overrides: Map<string, SyntheticQuoteUpdate>,
+): Quote {
+  const option =
+    symbol.type === 'option' ? optionContracts.get(symbol.brokerSymbol ?? '') : undefined
+  if (
+    symbol.type === 'option' &&
+    (!option ||
+      symbol.provider !== MOCK_PROVIDER ||
+      symbol.canonicalSymbol !== `mock-option:${String(option.brokerContractId)}`)
+  ) {
+    return {
+      symbol,
+      status: 'unavailable',
+      timestamp: now(),
+      metadata: { provider: MOCK_PROVIDER, synthetic: true },
+    }
+  }
+  const base = option ? BASE_PRICES[option.underlying] : undefined
+  const intrinsic =
+    option && base !== undefined
+      ? option.right === 'call'
+        ? Math.max(0, base - option.strike)
+        : Math.max(0, option.strike - base)
+      : undefined
+  const last =
+    option && base !== undefined && intrinsic !== undefined
+      ? round(Math.max(0.5, intrinsic + 2.5 - Math.abs(base - option.strike) * 0.05))
+      : (BASE_PRICES[symbol.ticker] ?? 100)
+  const halfSpread = option ? 0.01 : 0.05
+  const override = overrides.get(instrumentKey(symbol))
+  const quotedLast = override?.last ?? last
+  return {
+    symbol,
+    last: quotedLast,
+    bid: override?.bid ?? round(last - halfSpread),
+    ask: override?.ask ?? round(last + halfSpread),
+    spread: override ? override.ask - override.bid : halfSpread * 2,
+    change: quotedLast - (last - 1.25),
+    changePercent: ((quotedLast - (last - 1.25)) / (last - 1.25)) * 100,
+    open: last - 1.1,
+    high: Math.max(last + 1.4, quotedLast),
+    low: Math.min(last - 1.8, quotedLast),
+    previousClose: last - 1.25,
+    volume: 2_450_000,
+    timestamp: now(),
+    status: 'ok',
+    metadata: { provider: MOCK_PROVIDER, synthetic: true },
+  }
 }

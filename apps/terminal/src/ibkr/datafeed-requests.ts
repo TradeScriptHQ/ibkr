@@ -14,6 +14,7 @@ import type {
 import { isSdkError, SdkError } from '@tradescript/pro/sdk'
 import { GatewayRequestError, gatewayRequest } from './broker-request.js'
 import {
+  backendQuoteMatches,
   optionContractCode,
   sharedQuoteMetadata,
   toQuote,
@@ -135,14 +136,12 @@ export async function getQuotes(
   symbols: Array<string | SymbolInfo>,
 ): Promise<Quote[]> {
   const backendQuotes = await getBackendQuotes(baseUrl, symbols)
-  const requestedSymbols = new Map(
-    symbols
-      .filter((symbol): symbol is SymbolInfo => typeof symbol !== 'string')
-      .map((symbol) => [(symbol.brokerSymbol ?? symbol.ticker).toUpperCase(), symbol]),
+  const requestedSymbols = symbols.filter(
+    (symbol): symbol is SymbolInfo => typeof symbol !== 'string',
   )
   return backendQuotes.map((quote) => {
     const mapped = toQuote(quote)
-    const requested = requestedSymbols.get(quote.symbol.symbol.toUpperCase())
+    const requested = requestedSymbols.find((symbol) => backendQuoteMatches(quote, symbol))
     return requested ? { ...mapped, symbol: requested } : mapped
   })
 }
@@ -151,20 +150,33 @@ export async function getBackendQuotes(
   baseUrl: string,
   symbols: Array<string | SymbolInfo>,
 ): Promise<BackendQuote[]> {
-  const params = new URLSearchParams()
-  const metadata = sharedQuoteMetadata(symbols)
+  const groups = new Map<string, Array<string | SymbolInfo>>()
   for (const symbol of symbols) {
-    if (typeof symbol === 'string') {
-      params.append('symbol', symbol)
-    } else {
-      params.append('symbol', symbol.brokerSymbol ?? symbol.ticker)
-    }
+    const key =
+      typeof symbol === 'string'
+        ? ''
+        : JSON.stringify([symbol.exchange, symbol.listedExchange, symbol.currency, symbol.type])
+    const group = groups.get(key) ?? []
+    group.push(symbol)
+    groups.set(key, group)
   }
-  if (metadata.exchange) params.set('exchange', metadata.exchange)
-  if (metadata.primaryExchange) params.set('primaryExchange', metadata.primaryExchange)
-  if (metadata.currency) params.set('currency', metadata.currency)
-  if (metadata.assetClass) params.set('assetClass', metadata.assetClass)
-  return get<BackendQuote[]>(baseUrl, `/quotes?${params.toString()}`)
+  const results = await Promise.all(
+    [...groups.values()].map(async (group) => {
+      const params = new URLSearchParams()
+      const metadata = sharedQuoteMetadata(group)
+      for (const symbol of group)
+        params.append(
+          'symbol',
+          typeof symbol === 'string' ? symbol : (symbol.brokerSymbol ?? symbol.ticker),
+        )
+      if (metadata.exchange) params.set('exchange', metadata.exchange)
+      if (metadata.primaryExchange) params.set('primaryExchange', metadata.primaryExchange)
+      if (metadata.currency) params.set('currency', metadata.currency)
+      if (metadata.assetClass) params.set('assetClass', metadata.assetClass)
+      return get<BackendQuote[]>(baseUrl, `/quotes?${params.toString()}`)
+    }),
+  )
+  return results.flat()
 }
 
 export async function getOptionSeries(
@@ -172,6 +184,9 @@ export async function getOptionSeries(
   symbol: string | SymbolInfo,
   expiration?: string,
   window: {
+    expiration?: string | undefined
+    tradingClass?: string | undefined
+    includeTradingClasses?: boolean | undefined
     centerPrice?: number | undefined
     quoteWindowRows?: number | undefined
     minStrike?: number | undefined
@@ -188,6 +203,9 @@ export function optionSeriesParams(
   symbol: string | SymbolInfo,
   expiration?: string,
   window: {
+    expiration?: string | undefined
+    tradingClass?: string | undefined
+    includeTradingClasses?: boolean | undefined
     centerPrice?: number | undefined
     quoteWindowRows?: number | undefined
     minStrike?: number | undefined
@@ -197,6 +215,8 @@ export function optionSeriesParams(
   const symbolInfo = typeof symbol === 'string' ? undefined : symbol
   const underlying = typeof symbol === 'string' ? symbol : (symbol.brokerSymbol ?? symbol.ticker)
   const params = new URLSearchParams({ underlying })
+  if (window.tradingClass) params.set('tradingClass', window.tradingClass)
+  if (window.includeTradingClasses === true) params.set('includeTradingClasses', 'true')
   if (expiration) {
     params.append('expiration', expiration)
     // Preserve the catalog so the SDK can apply its own strike-row selector.
@@ -250,6 +270,7 @@ export function toOptionSeriesSnapshot(
         last_update: Number.isFinite(quoteTimestamp) ? quoteTimestamp : undefined,
         metrics: item.marketDataType ? { ibkrMarketDataType: item.marketDataType } : undefined,
         provider: 'IBKR',
+        trading_class: item.contract.tradingClass,
       }
     }),
   )
@@ -259,7 +280,9 @@ export function toOptionSeriesSnapshot(
     .filter((value): value is number => Number.isFinite(value))
   const lastUpdate = quoteTimes.length ? Math.max(...quoteTimes) : 0
   const age = lastUpdate > 0 ? Math.max(0, now - lastUpdate) : Number.MAX_SAFE_INTEGER
-  return withoutUndefined<OptionSeriesSnapshot>({
+  const snapshot = {
+    trading_class: chain.tradingClass,
+    trading_classes: chain.tradingClasses,
     symbol: chain.underlying,
     provider: 'IBKR',
     quote_timestamp: lastUpdate,
@@ -271,7 +294,20 @@ export function toOptionSeriesSnapshot(
     quote_freshness: {
       last_update: lastUpdate,
       age_ms: age,
-      status: lastUpdate === 0 ? 'unavailable' : age < 15_000 ? 'current' : 'stale',
+      status:
+        lastUpdate === 0
+          ? 'unavailable'
+          : age >= 15_000
+            ? 'stale'
+            : contracts.some(
+                  (contract) => contract.metrics?.ibkrMarketDataType === 'delayed-frozen',
+                )
+              ? 'delayed-frozen'
+              : contracts.some((contract) => contract.metrics?.ibkrMarketDataType === 'delayed')
+                ? 'delayed'
+                : contracts.some((contract) => contract.metrics?.ibkrMarketDataType === 'frozen')
+                  ? 'frozen'
+                  : 'current',
     },
     field_provenance: {
       contracts: { source: 'IBKR', endpoint },
@@ -286,17 +322,22 @@ export function toOptionSeriesSnapshot(
       open_interest: contracts.some((contract) => contract.open_interest > 0),
       volume: contracts.some((contract) => contract.volume !== undefined),
     },
-  })
+  }
+  return withoutUndefined<
+    OptionSeriesSnapshot & {
+      trading_class?: string
+      trading_classes?: NonNullable<BackendOptionChainResult['tradingClasses']>
+    }
+  >(snapshot)
 }
 
 function priceIncrementAt(
   bands: Array<{ lowEdge: number; increment: number }> | undefined,
   price: number | undefined,
 ): number | undefined {
-  if (!bands?.length) return undefined
-  const finitePrice = price !== undefined && Number.isFinite(price) ? price : 0
+  if (!bands?.length || price === undefined || !Number.isFinite(price)) return undefined
   return bands
-    .filter((band) => band.lowEdge <= finitePrice && band.increment > 0)
+    .filter((band) => band.lowEdge <= price && band.increment > 0)
     .sort((left, right) => right.lowEdge - left.lowEdge)[0]?.increment
 }
 
@@ -314,13 +355,33 @@ export async function loadBars(
     barCount: String(request.barCount),
   })
   if (symbol.exchange) params.set('exchange', symbol.exchange)
+  if (symbol.listedExchange) params.set('primaryExchange', symbol.listedExchange)
   if (symbol.currency) params.set('currency', symbol.currency)
   if (symbol.type) params.set('assetClass', symbol.type)
   const result = await get<BackendBarHistoryResult>(baseUrl, `/bars?${params.toString()}`)
+  const ascending = [...new Map(result.bars.map((bar) => [bar.time, bar])).values()].sort(
+    (left, right) => left.time - right.time,
+  )
+  const inWindow = ascending.filter(
+    (bar) =>
+      Number.isFinite(bar.time) &&
+      (request.loadDirection === 'newer'
+        ? bar.time > request.startTime
+        : bar.time >= request.startTime) &&
+      (request.loadDirection === 'older'
+        ? bar.time < request.endTime
+        : bar.time <= request.endTime),
+  )
+  const bars =
+    request.loadDirection === 'newer'
+      ? inWindow.slice(0, request.barCount)
+      : inWindow.slice(-request.barCount)
+  const first = bars[0]?.time ?? request.startTime
+  const last = bars.at(-1)?.time ?? request.endTime
   return withoutUndefined<BarHistoryResult>({
-    bars: result.bars,
-    hasOlder: result.hasOlder,
-    hasNewer: result.hasNewer,
+    bars,
+    hasOlder: result.hasOlder || ascending.some((bar) => bar.time < first),
+    hasNewer: result.hasNewer || ascending.some((bar) => bar.time > last),
     dataUnavailable: result.dataUnavailable,
   })
 }

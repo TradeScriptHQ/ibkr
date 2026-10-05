@@ -1,50 +1,104 @@
+import { getVersion } from '@tauri-apps/api/app'
 import { isTauri } from '@tauri-apps/api/core'
-import { StandardModal } from '@tradescript/pro/react/ui'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { AppNotification } from './app-notifications.js'
+import { AppModal } from './appearance-ui.js'
+import { APP_LOGO, APP_NAME } from './branding.js'
+import { LEGAL_DOCUMENTS } from './legal-documents.js'
 
-const documents = [
-  ['Software licences', 'DISTRIBUTION.md'],
-  ['Data and services', 'DATA.md'],
-  ['Terminal licence', 'TERMINAL-LICENSE.txt'],
-  ['SDK licence', 'SDK-LICENSE'],
-  ['SDK third-party notices', 'SDK-THIRD_PARTY_NOTICES.md'],
-  ['Runtime third-party notices', 'THIRD-PARTY-NOTICES.txt'],
-  ['Node licence', 'NODE-LICENSE.txt'],
-] as const
-export function LegalNotices() {
-  const [document, setDocument] = useState<{ title: string; contents: string }>()
-  if (!isTauri()) return null
-  const open = async (title: string, file: string) => {
-    setDocument({ title, contents: 'Loading…' })
+const OPEN_ABOUT = 'terminal:about'
+
+export function AboutDialog() {
+  const [open, setOpen] = useState(false)
+  const [version, setVersion] = useState<string>()
+  const [document, setDocument] = useState<{
+    title: string
+    file: string
+    contents: string
+    requestId: number
+    error?: string
+  }>()
+  const documentRequest = useRef(0)
+  const desktop = isTauri()
+  useEffect(() => {
+    if (!desktop) return
+    let active = true
+    void getVersion()
+      .then((value) => {
+        if (active) setVersion(value)
+      })
+      .catch(() => console.warn('The application version could not be read.'))
+    const show = () => {
+      setDocument(undefined)
+      setOpen(true)
+    }
+    window.addEventListener(OPEN_ABOUT, show)
+    return () => {
+      active = false
+      window.removeEventListener(OPEN_ABOUT, show)
+    }
+  }, [desktop])
+  if (!desktop) return null
+
+  const readDocument = async (title: string, file: string) => {
+    const requestId = ++documentRequest.current
+    setDocument({ title, file, contents: 'Loading…', requestId })
+    let result: { contents: string; error?: string }
     try {
       const response = await fetch(`/legal/${file}`)
       if (!response.ok) throw new Error('missing')
-      setDocument({ title, contents: await response.text() })
+      result = { contents: await response.text() }
     } catch {
-      setDocument({ title, contents: 'This document is unavailable in this build.' })
+      result = { contents: '', error: 'This document is unavailable in this build.' }
     }
+    setDocument((current) =>
+      current?.requestId === requestId ? { ...current, ...result } : current,
+    )
   }
+
   return (
     <>
-      <details className="setup-notices">
-        <summary>Licences and data information</summary>
-        {documents.map(([title, file]) => (
-          <button type="button" key={file} onClick={() => void open(title, file)}>
-            {title}
-          </button>
-        ))}
-      </details>
-      <StandardModal
-        open={!!document}
+      <AppNotification message={document?.error ?? ''} occurrence={document?.requestId} />
+      <AppModal
+        open={open}
         onOpenChange={(value) => {
+          setOpen(value)
           if (!value) setDocument(undefined)
         }}
-        title={document?.title ?? 'Legal notices'}
+        title={document?.title ?? `About ${APP_NAME}`}
         width="700px"
+        boundary="viewport"
+        contentClassName="about-dialog-body"
+        closeLabel="Close About"
         headerDensity="compact"
       >
-        <pre className="legal-document">{document?.contents}</pre>
-      </StandardModal>
+        {document ? (
+          <>
+            <button className="about-back" type="button" onClick={() => setDocument(undefined)}>
+              Back to About
+            </button>
+            {!document.error && <pre className="legal-document">{document.contents}</pre>}
+          </>
+        ) : (
+          <>
+            <div className="about-app">
+              <img className="brand-mark" src={APP_LOGO} alt="" />
+              <div>
+                <strong>{APP_NAME}</strong>
+                {version && <span className="about-version">Version {version}</span>}
+              </div>
+            </div>
+            <section className="about-notices" aria-label="Licences">
+              <h4>Licences</h4>
+              {LEGAL_DOCUMENTS.map(([title, file]) => (
+                <button type="button" key={file} onClick={() => void readDocument(title, file)}>
+                  {title}
+                </button>
+              ))}
+            </section>
+          </>
+        )}
+      </AppModal>
     </>
   )
 }

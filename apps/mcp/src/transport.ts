@@ -12,7 +12,10 @@ interface McpTransportRecord {
   readonly transport: StreamableHTTPServerTransport
 }
 
-export function createMcpTransport(bridge: BrowserBridge) {
+export function createMcpTransport(
+  bridge: BrowserBridge,
+  authority: { readonly allowedHosts: string[]; readonly allowedOrigins: string[] },
+) {
   const transports = new Map<string, McpTransportRecord>()
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const body = request.method === 'POST' ? await readJson(request) : undefined
@@ -25,6 +28,9 @@ export function createMcpTransport(bridge: BrowserBridge) {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: randomUUID,
         enableJsonResponse: true,
+        enableDnsRebindingProtection: true,
+        allowedHosts: authority.allowedHosts,
+        allowedOrigins: authority.allowedOrigins,
         onsessioninitialized(id) {
           transports.set(id, created)
         },
