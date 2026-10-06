@@ -46,3 +46,46 @@ it('preserves broker error status and message for failed mutations', async () =>
     gatewayRequest('/bridge', '/orders', { method: 'POST', body: {} }, 'csrf', 'generation'),
   ).rejects.toEqual(new GatewayRequestError(409, '/orders', 'Rejected by broker'))
 })
+
+it('gives the chart a product explanation only for typed market-data failures', async () => {
+  const message =
+    "IBKR sent no chart history for AAPL while it reports that another session is using this account's live market data (IBKR 10197)."
+  const respond = (body: unknown, status: number) =>
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status })),
+    )
+  const request = {
+    startTime: 0,
+    endTime: 1_000,
+    barCount: 500,
+  }
+  const feed = createIbkrMarketDatafeed({ baseUrl: '/bridge' })
+  const symbol = { ticker: 'AAPL', exchange: 'SMART', currency: 'USD', type: 'stock' } as const
+
+  respond({ error: { code: 'market-data-competing-session', message, requestId: 'r1' } }, 503)
+  await expect(feed.loadBars(symbol, '5m', request)).rejects.toMatchObject({
+    code: 'datafeed.request-failed',
+    details: { status: 503, code: 'market-data-competing-session' },
+    presentation: {
+      title: 'IBKR is withholding market data',
+      message:
+        'IBKR reports a competing live session. Restart TWS or IB Gateway and log in again; if this persists, sign out of IBKR on other devices.',
+    },
+  })
+
+  const rejection =
+    'IBKR rejected the chart history request for AAPL: No market data permissions (IBKR 162)'
+  respond({ error: { code: 'market-data-rejected', message: rejection, requestId: 'r3' } }, 503)
+  await expect(feed.loadBars(symbol, '5m', request)).rejects.toMatchObject({
+    presentation: { title: 'IBKR rejected the request', message: rejection },
+  })
+
+  respond(
+    { error: { code: 'internal-error', message: 'The gateway failed.', requestId: 'r2' } },
+    500,
+  )
+  const internal = await feed.loadBars(symbol, '5m', request).catch((error: unknown) => error)
+  expect(internal).toMatchObject({ code: 'datafeed.request-failed', details: { status: 500 } })
+  expect((internal as { presentation?: unknown }).presentation).toBeUndefined()
+})

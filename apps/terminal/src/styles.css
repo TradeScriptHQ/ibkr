@@ -1398,6 +1398,47 @@ h1 {
   overflow-wrap: anywhere;
 }
 
+.ibkr-option-chain-reference {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ibkr-option-chain-reference-status {
+  min-width: 0;
+}
+
+.ibkr-option-chain-greeks {
+  flex: none;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--ts-chart-control-border, var(--app-border));
+  border-radius: var(--ts-chart-control-radius, 6px);
+  background: transparent;
+  color: var(--ts-chart-surface-muted-text, var(--app-text-muted));
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ibkr-option-chain-greeks:hover {
+  background: var(--ts-chart-button-hover-bg, var(--app-control-hover));
+  color: var(--ts-chart-surface-text, var(--app-text));
+}
+
+.ibkr-option-chain-greeks[aria-pressed="true"] {
+  background: var(--ts-chart-control-bg, var(--app-control));
+  color: var(--ts-chart-surface-text, var(--app-text));
+}
+
+.ibkr-option-chain-greeks:focus-visible {
+  outline: 2px solid var(--ts-chart-accent, var(--app-focus));
+  outline-offset: 2px;
+}
+
 .connection-health-control {
   position: relative;
 }

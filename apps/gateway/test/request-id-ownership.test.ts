@@ -286,11 +286,15 @@ describe('one ID owner for queries, streams and executable orders', () => {
     service['options'].optionQuoteStreams.read({ conId: 10, secType: SecType.OPT })
     const optionId = ib.reqMktData.mock.calls[0]?.[0] as number
     service['options'].optionQuoteStreams.readMany([{ conId: 11, secType: SecType.OPT }])
-    service.getMarketDepth(symbol)
+    // A window releases AAPL's streams; claiming MSFT takes their IBKR slots straight away.
+    const window = 'window-1'
+    service.getMarketDepth(symbol, 20, { clientId: window, claimId: 'aapl-depth' })
     const depthId = ib.reqMktDepth.mock.calls[0]?.[0] as number
+    service.releaseStreamClaims(['aapl-depth'], window)
     service.getMarketDepth({ ...symbol, symbol: 'MSFT' })
-    service.getTimeAndSales(symbol)
+    service.getTimeAndSales(symbol, 200, { clientId: window, claimId: 'aapl-tape' })
     const tapeId = ib.reqTickByTickData.mock.calls[0]?.[0] as number
+    service.releaseStreamClaims(['aapl-tape'], window)
     service.getTimeAndSales({ ...symbol, symbol: 'MSFT' })
     expect(ib.cancelMktData).toHaveBeenCalledWith(optionId)
     expect(ib.cancelMktDepth).toHaveBeenCalledWith(depthId, true)

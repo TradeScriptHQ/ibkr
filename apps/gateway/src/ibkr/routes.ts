@@ -4,7 +4,9 @@ import type { GatewayConfig } from '../config.js'
 import { fromIbSymbol } from './contracts.js'
 import { executeEnvironmentBoundMutation } from './execution-environment.js'
 import type { IbkrService } from './ibkr-service.js'
+import type { StreamClaimRequest } from './market-streams.js'
 import type { OptionChainRequest } from './option-chains.js'
+import { RequestError } from './request-error.js'
 import { normalizeIbTimezone, parseIbSchedule } from './session-calendar.js'
 import type { BrokerStateStore } from './state-store.js'
 import type {
@@ -44,6 +46,8 @@ interface IbkrRouteOptions {
   ibkr: IbkrService
   brokerStore: BrokerStateStore
   authenticated: RouteShorthandOptions
+  /** Session, exact origin, JSON and CSRF, without requiring a ready broker connection. */
+  sessionMutation: RouteShorthandOptions
   financialMutation: RouteShorthandOptions
   brokerInspection: RouteShorthandOptions
   brokerMutation<T>(
@@ -53,9 +57,32 @@ interface IbkrRouteOptions {
   ): Promise<T>
 }
 
+const STREAM_ID_PATTERN = /^[A-Za-z0-9-]{8,64}$/u
+
+/** A window's stream client and a widget's claim, as sent by the terminal datafeed. */
+/** An optional numeric query bound; anything that is not a finite number is ignored. */
+function finiteQueryNumber(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === '') return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function streamClaim(query: Record<string, string | undefined>): StreamClaimRequest | undefined {
+  const { client: clientId, claim: claimId } = query
+  if (clientId === undefined && claimId === undefined) return undefined
+  if (
+    (clientId !== undefined && !STREAM_ID_PATTERN.test(clientId)) ||
+    (claimId !== undefined && !STREAM_ID_PATTERN.test(claimId))
+  ) {
+    throw new RequestError(400, 'Invalid stream client or claim.')
+  }
+  return { clientId, claimId }
+}
+
 /** Broker HTTP endpoints; authentication and journaling are supplied by the server. */
 export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptions): void {
-  const { authenticated, financialMutation, brokerInspection, brokerMutation } = options
+  const { authenticated, sessionMutation, financialMutation, brokerInspection, brokerMutation } =
+    options
   app.get('/api/v1/ibkr/health', authenticated, async () => {
     const { brokerStore } = options
     const state = brokerStore.getState()
@@ -71,6 +98,7 @@ export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptio
       liveOrdersEnabled: options.config.ibkr.liveOrdersEnabled,
       connectionStatus: state.connectionStatus,
       marketDataConnection: state.marketDataConnection,
+      competingLiveSession: options.ibkr.competingLiveSessionReported(),
       activeAccountId: state.activeAccountId,
     }
   })
@@ -122,7 +150,33 @@ export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptio
       reply.raw.write(`event: ${event.type}\n`)
       reply.raw.write(`data: ${JSON.stringify(event)}\n\n`)
     })
-    request.raw.once('close', unsubscribe)
+    // A window's depth and tape claims stay alive while its event stream is open.
+    const clientId = (request.query as { client?: string }).client
+    const disconnectStreams =
+      clientId && STREAM_ID_PATTERN.test(clientId)
+        ? options.ibkr.connectStreamClient(clientId)
+        : undefined
+    request.raw.once('close', () => {
+      unsubscribe()
+      disconnectStreams?.()
+    })
+  })
+
+  app.post('/api/v1/ibkr/streams/release', sessionMutation, async (request) => {
+    const body = request.body as { clientId?: unknown; claimIds?: unknown } | undefined
+    const clientId = body?.clientId
+    const claimIds = body?.claimIds
+    if (
+      typeof clientId !== 'string' ||
+      !STREAM_ID_PATTERN.test(clientId) ||
+      !Array.isArray(claimIds) ||
+      claimIds.length > 50 ||
+      !claimIds.every((id) => typeof id === 'string' && STREAM_ID_PATTERN.test(id))
+    ) {
+      throw new RequestError(400, 'Invalid stream claim release.')
+    }
+    options.ibkr.releaseStreamClaims(claimIds as string[], clientId)
+    return { released: claimIds.length }
   })
 
   app.get('/api/v1/ibkr/symbols/search', authenticated, async (request) => {
@@ -288,6 +342,7 @@ export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptio
         ...(query.assetClass ? { assetClass: query.assetClass } : {}),
       },
       Number(query.levels ?? 20),
+      streamClaim(query),
     )
   })
 
@@ -303,6 +358,12 @@ export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptio
         ...(query.assetClass ? { assetClass: query.assetClass } : {}),
       },
       Number(query.limit ?? 200),
+      streamClaim(query),
+      {
+        startTime: finiteQueryNumber(query.startTime),
+        endTime: finiteQueryNumber(query.endTime),
+        beforeSequence: finiteQueryNumber(query.beforeSequence),
+      },
     )
   })
 

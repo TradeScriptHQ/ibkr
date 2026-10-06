@@ -110,6 +110,17 @@ export const TradeScriptBootstrapResponseSchema = z.object({
 })
 export type TradeScriptBootstrapResponse = z.infer<typeof TradeScriptBootstrapResponseSchema>
 
+/** Market-data failures whose cause the gateway knows and the terminal explains to the user. */
+export const MarketDataErrorCodeSchema = z.enum([
+  // IBKR 10197: another session is using the account's live market data.
+  'market-data-competing-session',
+  // IBKR accepted a historical request but never answered it.
+  'market-data-timeout',
+  // IBKR answered a historical request with an error.
+  'market-data-rejected',
+])
+export type MarketDataErrorCode = z.infer<typeof MarketDataErrorCodeSchema>
+
 export const ApiErrorCodeSchema = z.enum([
   'bad-request',
   'forbidden-origin',
@@ -121,6 +132,7 @@ export const ApiErrorCodeSchema = z.enum([
   'rate-limited',
   'outcome-unknown',
   'internal-error',
+  ...MarketDataErrorCodeSchema.options,
 ])
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>
 

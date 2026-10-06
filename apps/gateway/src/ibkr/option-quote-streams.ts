@@ -23,8 +23,13 @@ interface Entry {
   askSize?: number | undefined
   pendingBidPrice?: number | undefined
   pendingAskPrice?: number | undefined
+  /** TWS explicitly reported no price on this side, as it does for every option after the close. */
+  bidWithdrawn?: boolean | undefined
+  askWithdrawn?: boolean | undefined
   timeout: ReturnType<typeof setTimeout>
 }
+
+const MODEL_FIELDS = ['impliedVolatility', 'delta', 'gamma', 'theta', 'vega', 'mark'] as const
 
 export type OptionStreamListener = (contract: Contract, quote: OptionStreamQuote) => void
 
@@ -149,12 +154,14 @@ export class OptionQuoteStreams {
       if (value < 0) {
         entry[pending] = value
         delete entry.quote[key]
+        this.withdraw(entry, key)
       } else if (value === 0) {
         // Zero may be valid (positive size) or unavailable (size 0); resolve on size.
         entry[pending] = value
       } else {
         entry[pending] = undefined
         entry.quote[key] = value
+        entry[key === 'bid' ? 'bidWithdrawn' : 'askWithdrawn'] = false
       }
     } else if (key) {
       if (value > 0) entry.quote[key] = value
@@ -214,8 +221,13 @@ export class OptionQuoteStreams {
       const pendingPrice = entry.pendingBidPrice
       if (pendingPrice !== undefined) {
         entry.pendingBidPrice = undefined
-        if (pendingPrice < 0 || value === 0) delete entry.quote.bid
-        else entry.quote.bid = pendingPrice
+        if (pendingPrice < 0 || value === 0) {
+          delete entry.quote.bid
+          this.withdraw(entry, 'bid')
+        } else {
+          entry.quote.bid = pendingPrice
+          entry.bidWithdrawn = false
+        }
       }
       this.emit(this.key(entry.contract))
       return true
@@ -225,8 +237,13 @@ export class OptionQuoteStreams {
       const pendingPrice = entry.pendingAskPrice
       if (pendingPrice !== undefined) {
         entry.pendingAskPrice = undefined
-        if (pendingPrice < 0 || value === 0) delete entry.quote.ask
-        else entry.quote.ask = pendingPrice
+        if (pendingPrice < 0 || value === 0) {
+          delete entry.quote.ask
+          this.withdraw(entry, 'ask')
+        } else {
+          entry.quote.ask = pendingPrice
+          entry.askWithdrawn = false
+        }
       }
       this.emit(this.key(entry.contract))
       return true
@@ -258,6 +275,8 @@ export class OptionQuoteStreams {
       entry.pendingAskPrice = undefined
       entry.bidSize = undefined
       entry.askSize = undefined
+      entry.bidWithdrawn = undefined
+      entry.askWithdrawn = undefined
       this.emit(key)
     }
     this.byRequest.clear()
@@ -284,6 +303,18 @@ export class OptionQuoteStreams {
 
   private key(contract: Contract): string {
     return `${contract.conId}:${contract.exchange ?? 'SMART'}:${contract.currency ?? 'USD'}`
+  }
+
+  /**
+   * Model values describe the last two-sided market; once TWS withdraws both sides they stop
+   * updating, so drop them instead of showing them beside an empty quote. Later model ticks apply.
+   */
+  private withdraw(entry: Entry, side: 'bid' | 'ask'): void {
+    const flag = side === 'bid' ? 'bidWithdrawn' : 'askWithdrawn'
+    if (entry[flag]) return
+    entry[flag] = true
+    if (!entry.bidWithdrawn || !entry.askWithdrawn) return
+    for (const field of MODEL_FIELDS) delete entry.quote[field]
   }
 
   private touch(key: string, entry: Entry): void {

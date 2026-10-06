@@ -24,6 +24,12 @@ import { SUPPORTED_ORDER_TYPES } from './ibkr/broker-order-rules.js'
 import { MOCK_PROVIDER } from './mock/identity.js'
 
 type AgentTradingBootstrap = TradeScriptBootstrapResponse['paperTrading']
+/**
+ * How long one risk evaluation waits for broker facts to stop changing. It covers a cold
+ * gateway FX conversion, which is bounded at 10 seconds, and fails the order visibly instead of
+ * leaving it pending while facts keep moving.
+ */
+const RISK_FACTS_SETTLE_MS = 12_000
 type UnitRiskRequest = RiskOrderDecisionRequest & {
   quantity: number
   projectedPositionQuantity: number
@@ -68,19 +74,26 @@ class BrokerUtilizationSource implements RiskPolicyUtilizationSource {
     positions: RiskPolicyUtilization['positions'],
   ): RiskPolicyUtilization {
     const asOf = Date.now()
+    // The latest moment each order can have been submitted. IBKR omits the submission time of
+    // orders read back from its completed list; those were submitted no later than they completed.
     const orders = new Map(
-      [...state.orders, ...(state.ordersHistory ?? [])].map((order) => [
-        `${order.accountId}:${order.id}`,
-        order,
-      ]),
+      [
+        ...state.orders.map((order) => ({ order, submittedBy: order.createdAt })),
+        ...(state.ordersHistory ?? []).map((order) => ({
+          order,
+          submittedBy: order.createdAt ?? order.updatedAt,
+        })),
+      ].map((row) => [`${row.order.accountId}:${row.order.id}`, row]),
     )
     const accounts = state.accounts.flatMap((account) => {
       const dailyPnl = numberField(account.customFields, 'dailyPnl')
-      const accountOrders = [...orders.values()].filter((order) => order.accountId === account.id)
+      const accountOrders = [...orders.values()].filter(
+        ({ order }) => order.accountId === account.id,
+      )
       if (
         dailyPnl === undefined ||
         state.ordersHistory === undefined ||
-        accountOrders.some((order) => !isNonNegative(order.createdAt) || order.createdAt > asOf)
+        accountOrders.some(({ submittedBy }) => !isNonNegative(submittedBy) || submittedBy > asOf)
       )
         return []
       const createdAfter = asOf - 60_000
@@ -88,11 +101,10 @@ class BrokerUtilizationSource implements RiskPolicyUtilizationSource {
         {
           accountId: account.id,
           dailyLoss: Math.max(0, -dailyPnl),
+          // An order whose bound falls inside the window may have been submitted in it; count it.
           ordersInLastMinute: accountOrders.filter(
-            (order) =>
-              isNonNegative(order.createdAt) &&
-              order.createdAt >= createdAfter &&
-              order.createdAt <= asOf,
+            ({ submittedBy }) =>
+              isNonNegative(submittedBy) && submittedBy >= createdAfter && submittedBy <= asOf,
           ).length,
         },
       ]
@@ -170,7 +182,24 @@ export async function createConnectionRiskAuthority(
         if (refreshQueued && !destroyed) refresh()
       })
   }
-  const unsubscribe = broker.subscribe?.(() => refresh())
+  // Logs and notices carry no positions, balances or orders, and gateway diagnostics are produced
+  // by the very requests a refresh makes, so they must not schedule another refresh.
+  const unsubscribe = broker.subscribe?.((event) => {
+    if (event.type !== 'log' && event.type !== 'message') refresh()
+  })
+  const settle = async (deadline: number): Promise<void> => {
+    while (refreshPromise) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) throw unsettledFactsError()
+      let timer: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([
+        refreshPromise,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, remaining)
+        }),
+      ]).finally(() => clearTimeout(timer))
+    }
+  }
   const requireAccountFacts = (accountId: string) => {
     if (
       latestState.connectionStatus !== 'connected' ||
@@ -197,8 +226,10 @@ export async function createConnectionRiskAuthority(
     operationId?: string
     timeInForce?: TradingPlaceOrderRiskIntent['draft']['duration']
     atomicConstituent?: boolean
+    deadline?: number
   }): Promise<UnitRiskRequest> => {
-    while (refreshPromise) await refreshPromise
+    const deadline = input.deadline ?? Date.now() + RISK_FACTS_SETTLE_MS
+    await settle(deadline)
     if (refreshFailure !== undefined) {
       throw new Error('Current broker position sizing is unavailable for risk evaluation.')
     }
@@ -213,7 +244,7 @@ export async function createConnectionRiskAuthority(
     const multiplier =
       input.multiplier ?? (await contractMultiplier(broker, input.symbol, input.accountId))
     const quote = await requireQuote(datafeed, input.symbol)
-    while (refreshPromise) await refreshPromise
+    await settle(deadline)
     if (refreshFailure !== undefined)
       throw new Error('Current broker position sizing is unavailable for risk evaluation.')
     requireAccountFacts(input.accountId)
@@ -226,12 +257,14 @@ export async function createConnectionRiskAuthority(
     )
     let projectionState: TradingState
     let positions: RiskPolicyUtilization['positions']
-    do {
-      while (refreshPromise) await refreshPromise
+    for (;;) {
+      await settle(deadline)
       projectionState = latestState
       positions = await positionUtilization(broker, projectionState, sdkLimits.maxMarketDataAgeMs)
-      while (refreshPromise) await refreshPromise
-    } while (latestState !== projectionState)
+      await settle(deadline)
+      if (latestState === projectionState) break
+      if (Date.now() >= deadline) throw unsettledFactsError()
+    }
     if (refreshFailure !== undefined)
       throw new Error('Current broker position sizing is unavailable for risk evaluation.')
     utilization.update(projectionState, positions)
@@ -322,10 +355,11 @@ export async function createConnectionRiskAuthority(
       throw new Error(
         'Multi-leg agent risk requires atomic per-leg exposure, which this SDK does not support.',
       )
+    const deadline = Date.now() + RISK_FACTS_SETTLE_MS
     let projectionState: TradingState
     let constituents: UnitRiskRequest[]
-    do {
-      while (refreshPromise) await refreshPromise
+    for (;;) {
+      await settle(deadline)
       projectionState = latestState
       constituents = await Promise.all(
         legs.map((leg) =>
@@ -334,6 +368,7 @@ export async function createConnectionRiskAuthority(
             accountId,
             orderType: order.type,
             atomicConstituent: true,
+            deadline,
             ...orderExposureFacts(
               { ...order, strategyLegs: [leg] },
               modifiedQuantity,
@@ -344,8 +379,10 @@ export async function createConnectionRiskAuthority(
           }),
         ),
       )
-      while (refreshPromise) await refreshPromise
-    } while (latestState !== projectionState)
+      await settle(deadline)
+      if (latestState === projectionState) break
+      if (Date.now() >= deadline) throw unsettledFactsError()
+    }
     const primary = constituents[0]
     if (!primary) throw new Error('Exact constituent risk facts are unavailable.')
     const identities = new Set(constituents.map((row) => row.instrumentId))
@@ -392,7 +429,7 @@ export async function createConnectionRiskAuthority(
     context: { symbol: SdkSymbolInfo; accountId?: string },
   ) => {
     refresh()
-    while (refreshPromise) await refreshPromise
+    await settle(Date.now() + RISK_FACTS_SETTLE_MS)
     if (refreshFailure !== undefined)
       throw new Error('Current broker position facts are unavailable for risk evaluation.')
     const position = latestState.positions.find((row) => row.id === positionId)
@@ -550,6 +587,12 @@ export async function createConnectionRiskAuthority(
       controller.destroy()
     },
   }
+}
+
+function unsettledFactsError(): Error {
+  return new Error(
+    `Current broker positions and balances did not settle within ${RISK_FACTS_SETTLE_MS / 1_000} seconds, so the risk check could not use a consistent snapshot. Try again.`,
+  )
 }
 
 function supportsAtomicRisk(controller: RiskPolicyHostControllerApi): boolean {

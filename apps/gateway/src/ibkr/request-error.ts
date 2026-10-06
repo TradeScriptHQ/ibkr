@@ -1,4 +1,4 @@
-import type { TradeScriptAuthorizationFailure } from '@ibkr-terminal/contracts'
+import type { MarketDataErrorCode, TradeScriptAuthorizationFailure } from '@ibkr-terminal/contracts'
 
 export class RequestError extends Error {
   constructor(
@@ -7,5 +7,16 @@ export class RequestError extends Error {
     readonly authorizationFailure?: TradeScriptAuthorizationFailure,
   ) {
     super(message)
+  }
+}
+
+/** A market-data failure with a known cause; its message is written for the user. */
+export class MarketDataError extends RequestError {
+  constructor(
+    statusCode: number,
+    readonly code: MarketDataErrorCode,
+    message: string,
+  ) {
+    super(statusCode, message)
   }
 }

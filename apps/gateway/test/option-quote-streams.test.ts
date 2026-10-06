@@ -122,6 +122,38 @@ describe('persistent option quotes', () => {
     streams.clear()
   })
 
+  it('drops model values when TWS withdraws both sides after the close', () => {
+    const { streams } = fixture()
+    vi.setSystemTime('2026-10-05T19:59:00Z')
+    streams.read({ conId: 1 })
+    streams.price(1, 1, 4.4)
+    streams.price(1, 2, 4.5)
+    streams.price(1, 4, 4.45)
+    streams.computation(1, IBApiTickType.MODEL_OPTION, 0.27, 0.52, 4.46, 0.03, 0.08, -0.2)
+
+    // One withdrawn side keeps the model; TWS still quotes the other side.
+    streams.price(1, 1, -1)
+    streams.size(1, 0, 0)
+    expect(streams.read({ conId: 1 })).toMatchObject({ ask: 4.5, impliedVolatility: 0.27 })
+
+    // The close: TWS sends -1 with size 0 for the remaining side and stops model updates.
+    vi.setSystemTime('2026-10-05T20:00:00Z')
+    streams.price(1, 2, -1)
+    streams.size(1, 3, 0)
+    expect(streams.read({ conId: 1 })).toEqual({
+      last: 4.45,
+      quoteTimestamp: '2026-10-05T20:00:00.000Z',
+    })
+
+    // A model computation sent after the withdrawal is current, and a returning quote clears the state.
+    streams.computation(1, IBApiTickType.MODEL_OPTION, 0.3, 0.5, 4.4, 0.03, 0.08, -0.2)
+    expect(streams.read({ conId: 1 }).impliedVolatility).toBe(0.3)
+    streams.price(1, 1, 4.3)
+    streams.price(1, 1, -1)
+    expect(streams.read({ conId: 1 }).impliedVolatility).toBeUndefined()
+    streams.clear()
+  })
+
   it('expires streams when refreshing stops and renews active streams', () => {
     const { streams, cancel } = fixture()
     streams.read({ conId: 1 })

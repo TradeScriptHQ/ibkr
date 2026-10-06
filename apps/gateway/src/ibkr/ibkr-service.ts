@@ -3,24 +3,15 @@ import type {
   BrokerInstrumentDetails,
 } from '@ibkr-terminal/contracts'
 import type { Contract, ContractDescription, ContractDetails } from '@stoqey/ib'
-import {
-  type BarSizeSetting,
-  EventName,
-  type IBApi,
-  MarketDataType,
-  SecType,
-  TickByTickDataType,
-} from '@stoqey/ib'
+import { type BarSizeSetting, EventName, type IBApi, MarketDataType, SecType } from '@stoqey/ib'
 import { OrderIdAllocator } from '../tws/order-id-allocator.js'
 import { resolveAccountCurrencyConversion } from './account-currency-conversion.js'
 import { AccountSubscriptions } from './account-subscriptions.js'
 import { isIbRequestWarning } from './broker-errors.js'
 import type { BridgeConfig } from './config.js'
 import {
-  brokerSymbolKey,
   fromIbSymbol,
   nativeContractId,
-  normalizeBrokerSymbol,
   normalizeTicker,
   parseForexSymbol,
   searchForexSymbols,
@@ -34,6 +25,7 @@ import { opposingForecastContract } from './forecast-contracts.js'
 import { IbkrRequests } from './ibkr-requests.js'
 import { formatIbDateTime, toIbBarSize, toIbDurationString } from './market-data.js'
 import { MarketDataConnectionTracker } from './market-data-connection.js'
+import { MarketStreams, type StreamClaimRequest, type TapeRange } from './market-streams.js'
 import { positiveInteger } from './numbers.js'
 import type { IbSecDefOptionParameters } from './option-chain.js'
 import { type OptionChainRequest, OptionChains } from './option-chains.js'
@@ -42,7 +34,7 @@ import { authoritativePriceIncrements, selectedMarketRuleId } from './order-pric
 import type { PaperOwnershipJournal } from './paper-ownership-journal.js'
 import { installContractPipDefinitions } from './pip-definitions.js'
 import { QuoteSubscriptions } from './quote-subscriptions.js'
-import { RequestError } from './request-error.js'
+import { MarketDataError, RequestError } from './request-error.js'
 import type { ParsedSchedule } from './session-calendar.js'
 import { deriveSessionWindows, toMarketSessionInfo } from './session-calendar.js'
 import type { BrokerStateStore } from './state-store.js'
@@ -71,10 +63,6 @@ import type {
 const CONTRACT_DETAILS_TIMEOUT_MS = 12000
 const OPTION_CHAIN_TIMEOUT_MS = 12000
 const SYMBOL_SEARCH_TIMEOUT_MS = 3000
-const DEPTH_PENDING_MESSAGE =
-  'Gateway depth pending: IBKR has not returned rows or a request-specific diagnostic.'
-const DEPTH_NO_RESPONSE_MESSAGE =
-  'Gateway depth no response: IBKR has not returned rows or a request-specific diagnostic within 15 seconds; availability is unknown.'
 export class IbkrService {
   beginOrderReconciliation(): void {
     this.brokerAuthorityRevision += 1
@@ -107,31 +95,11 @@ export class IbkrService {
   private readonly quotes: QuoteSubscriptions
   private readonly requests: IbkrRequests
   private readonly qualifiedNativeOptions = new Map<number, BrokerSymbol>()
-  private marketDepthSubscription?:
-    | { reqId: number; symbol: BrokerSymbol; rows: number }
-    | undefined
-  private desiredMarketDepth?: { symbol: BrokerSymbol; rows: number } | undefined
-  private depthPendingTimer?: ReturnType<typeof setTimeout> | undefined
-  private tapeSubscription?: { reqId: number; symbol: BrokerSymbol } | undefined
-  private tapeFailure?:
-    | {
-        key: string
-        message: string
-        code?: number | undefined
-        retryAt: number
-        attempt: number
-      }
-    | undefined
-  private tapePrints: Array<{
-    time: number
-    price: number
-    size: number
-    venue?: string | undefined
-    conditions?: string[] | undefined
-    sequence: number
-  }> = []
-  private tapeRetention = 1_000
-  private tapeSequence = 0
+  private readonly fxQualifications = new Map<
+    string,
+    { revision: number; result: Promise<ContractDetails[]> }
+  >()
+  private readonly streams: MarketStreams
 
   constructor(
     private readonly config: BridgeConfig,
@@ -147,6 +115,7 @@ export class IbkrService {
       orderIds,
     )
     this.quotes = new QuoteSubscriptions(this.ib, this.store, () => this.allocateRequestId())
+    this.streams = new MarketStreams(this.ib, this.store, () => this.allocateRequestId())
     this.orders = new OrderExecution(
       this.ib,
       this.config,
@@ -181,6 +150,11 @@ export class IbkrService {
     this.registerHandlers()
   }
 
+  /** Whether IBKR reports that another session is using this account's live market data. */
+  competingLiveSessionReported(): boolean {
+    return this.quotes.competingLiveSessionReported()
+  }
+
   getQuotes(symbols: BrokerSymbol[], options: { maxAgeMs?: number } = {}): MarketQuote[] {
     return this.quotes.getQuotes(
       symbols.map((symbol) => this.knownNativeOptionSymbol(symbol)),
@@ -208,8 +182,7 @@ export class IbkrService {
     const toCurrency = account.currency
     const authorityRevision = this.brokerAuthorityRevision
     return resolveAccountCurrencyConversion(fromCurrency, toCurrency, {
-      requestContractDetails: (contract, timeoutMs) =>
-        this.requests.requestContractDetails(contract, timeoutMs),
+      requestContractDetails: (contract, timeoutMs) => this.qualifyFxPair(contract, timeoutMs),
       getQuotes: (symbols, options) => this.quotes.getQuotes(symbols, options),
       assertCurrent: () => {
         const current = this.store.getState()
@@ -222,6 +195,28 @@ export class IbkrService {
           throw new RequestError(503, 'Broker account or connection changed during FX conversion.')
       },
     })
+  }
+
+  /**
+   * FX pairs are listed in one direction only (EUR.USD, never USD.EUR), so conversion probes the
+   * missing direction first and IBKR answers it with error 200. Remember each definitive answer
+   * for the current broker authority so every valuation does not repeat that failing request.
+   */
+  private qualifyFxPair(contract: Contract, timeoutMs: number): Promise<ContractDetails[]> {
+    const key = `${contract.symbol}.${contract.currency}`
+    const cached = this.fxQualifications.get(key)
+    if (cached?.revision === this.brokerAuthorityRevision) return cached.result
+    const result = this.requests.requestContractDetails(contract, timeoutMs)
+    this.fxQualifications.set(key, { revision: this.brokerAuthorityRevision, result })
+    result.catch((error: unknown) => {
+      // Timeouts and disconnects are not answers about the pair; only "no such contract" is.
+      if (
+        !(error instanceof RequestError && error.statusCode === 404) &&
+        this.fxQualifications.get(key)?.result === result
+      )
+        this.fxQualifications.delete(key)
+    })
+    return result
   }
 
   private knownNativeOptionSymbol(symbol: BrokerSymbol): BrokerSymbol {
@@ -818,62 +813,32 @@ export class IbkrService {
     return { symbol, contract: contractDetails.contract, details: contractDetails }
   }
 
-  getMarketDepth(symbol: BrokerSymbol, rows = 20) {
+  getMarketDepth(symbol: BrokerSymbol, rows = 20, claim?: StreamClaimRequest) {
     if (this.store.getState().connectionStatus !== 'connected') {
       throw new RequestError(503, 'IBKR bridge is not connected')
     }
-    const normalized = normalizeBrokerSymbol(symbol)
-    const boundedRows = positiveInteger(rows) ?? 20
-    this.desiredMarketDepth = { symbol: normalized, rows: boundedRows }
-    const key = brokerSymbolKey(normalized)
-    const active = this.marketDepthSubscription
-    if (!active || brokerSymbolKey(active.symbol) !== key || active.rows !== boundedRows) {
-      if (active) this.ib.cancelMktDepth(active.reqId, true)
-      const reqId = this.allocateRequestId()
-      this.marketDepthSubscription = { reqId, symbol: normalized, rows: boundedRows }
-      this.store.setMarketDepth({
-        symbol: normalized,
-        bids: [],
-        asks: [],
-        updatedAt: new Date().toISOString(),
-        diagnostic: { message: DEPTH_PENDING_MESSAGE },
-      })
-      this.armDepthPendingTimeout(reqId)
-      this.ib.reqMktDepth(reqId, toIbContract(normalized), boundedRows, true, [])
-      this.store.addDiagnostic('info', `Subscribed market depth for ${normalized.symbol}`)
-    }
-    return this.store.getState().marketDepth
+    return this.streams.depth(symbol, positiveInteger(rows) ?? 20, claim)
   }
 
-  getTimeAndSales(symbol: BrokerSymbol, limit = 200) {
+  getTimeAndSales(
+    symbol: BrokerSymbol,
+    limit = 200,
+    claim?: StreamClaimRequest,
+    range?: TapeRange,
+  ) {
     if (this.store.getState().connectionStatus !== 'connected') {
       throw new RequestError(503, 'IBKR bridge is not connected')
     }
-    const normalized = normalizeBrokerSymbol(symbol)
-    const requestedLimit = positiveInteger(limit) ?? 200
-    this.tapeRetention = Math.max(this.tapeRetention, requestedLimit)
-    const key = brokerSymbolKey(normalized)
-    if (this.tapeFailure?.key !== key) this.tapeFailure = undefined
-    const active = this.tapeSubscription
-    if (!active || brokerSymbolKey(active.symbol) !== key) {
-      if (this.tapeFailure && Date.now() < this.tapeFailure.retryAt)
-        throw new RequestError(503, this.tapeFailure.message)
-      if (active) this.ib.cancelTickByTickData(active.reqId)
-      const reqId = this.allocateRequestId()
-      this.tapeSubscription = { reqId, symbol: normalized }
-      this.tapePrints = []
-      this.tapeSequence = 0
-      this.ib.reqTickByTickData(
-        reqId,
-        toIbContract(normalized),
-        TickByTickDataType.AllLast,
-        0,
-        false,
-      )
-      this.store.addDiagnostic('info', `Subscribed time and sales for ${normalized.symbol}`)
-    }
-    if (this.tapeFailure) throw new RequestError(503, this.tapeFailure.message)
-    return this.tapePrints.slice(-requestedLimit)
+    return this.streams.tape(symbol, positiveInteger(limit) ?? 200, claim, range)
+  }
+
+  /** Keep a window's depth and tape claims alive while its event connection is open. */
+  connectStreamClient(clientId: string): () => void {
+    return this.streams.connectClient(clientId)
+  }
+
+  releaseStreamClaims(claimIds: readonly string[], clientId: string | undefined): void {
+    this.streams.release(claimIds, clientId)
   }
 
   private readonly marketDataConnection = new MarketDataConnectionTracker()
@@ -896,10 +861,7 @@ export class IbkrService {
       )
       this.options.clear()
       this.accounts.clear()
-      this.marketDepthSubscription = undefined
-      this.tapeSubscription = undefined
-      this.tapeFailure = undefined
-      this.tapePrints = []
+      this.streams.disconnected()
       const message = `IBKR ${this.config.ibkrMode} API disconnected`
       this.store.setConnectionStatus('disconnected', message)
     })
@@ -926,40 +888,7 @@ export class IbkrService {
         this.store.addDiagnostic('warning', `${error.message}${suffix}`)
         return
       }
-      if (requestId != null && requestId === this.tapeSubscription?.reqId) {
-        const key = brokerSymbolKey(this.tapeSubscription.symbol)
-        const attempt = this.tapeFailure?.key === key ? this.tapeFailure.attempt + 1 : 1
-        this.tapeFailure = {
-          key,
-          message: `${error.message}${suffix}`,
-          code,
-          attempt,
-          retryAt: Date.now() + Math.min(60_000, 15_000 * 2 ** Math.min(attempt - 1, 2)),
-        }
-        this.tapeSubscription = undefined
-        this.tapePrints = []
-        this.ib.cancelTickByTickData(requestId)
-        this.store.addDiagnostic('warning', `Time and sales: ${error.message}${suffix}`)
-        return
-      }
-      if (requestId != null && requestId === this.marketDepthSubscription?.reqId) {
-        this.clearDepthPendingTimeout()
-        if (code === 316) {
-          this.restoreMarketDepth(error.message, code)
-          this.store.addDiagnostic('warning', `${error.message}${suffix}`)
-          return
-        }
-        const depth = this.store.getState().marketDepth
-        if (depth) {
-          this.store.setMarketDepth({
-            ...depth,
-            ...(code === 317 ? { bids: [], asks: [] } : {}),
-            diagnostic: { message: error.message, ...(code == null ? {} : { code }) },
-          })
-        }
-        this.store.addDiagnostic('warning', `${error.message}${suffix}`)
-        return
-      }
+      if (requestId != null && this.streams.handleError(error, code, requestId, suffix)) return
       if (this.quotes.handleQuoteError(error, code, requestId, suffix)) return
       if (this.options.handleOptionQuoteError(error, code, requestId, suffix)) {
         return
@@ -1035,22 +964,7 @@ export class IbkrService {
         exchange: string,
         specialConditions: string,
       ) => {
-        if (this.tapeSubscription?.reqId !== reqId) return
-        this.tapeFailure = undefined
-        const seconds = Number(time)
-        this.tapePrints = [
-          ...this.tapePrints.slice(-(this.tapeRetention - 1)),
-          {
-            time: Number.isFinite(seconds) ? seconds * 1_000 : Date.now(),
-            price,
-            size,
-            ...(exchange ? { venue: exchange } : {}),
-            ...(specialConditions
-              ? { conditions: specialConditions.split(',').filter(Boolean) }
-              : {}),
-            sequence: ++this.tapeSequence,
-          },
-        ]
+        this.streams.handleTick(reqId, time, price, size, exchange, specialConditions)
       },
     )
     this.ib.on(
@@ -1063,7 +977,7 @@ export class IbkrService {
         price: number,
         size: number,
       ) => {
-        this.handleMarketDepth(reqId, position, operation, side, price, size)
+        this.streams.handleDepthUpdate(reqId, position, operation, side, price, size)
       },
     )
     this.ib.on(
@@ -1077,124 +991,16 @@ export class IbkrService {
         price: number,
         size: number,
       ) => {
-        this.handleMarketDepth(reqId, position, operation, side, price, size, marketMaker)
+        this.streams.handleDepthUpdate(reqId, position, operation, side, price, size, marketMaker)
       },
     )
-  }
-
-  private handleMarketDepth(
-    reqId: number,
-    position: number,
-    operation: number,
-    side: number,
-    price: number,
-    size: number,
-    marketMaker?: string,
-  ): void {
-    const subscription = this.marketDepthSubscription
-    if (!subscription || subscription.reqId !== reqId || position < 0) return
-    const current = this.store.getState().marketDepth ?? {
-      symbol: subscription.symbol,
-      bids: [],
-      asks: [],
-      updatedAt: new Date().toISOString(),
-    }
-    const levels = [...(side === 1 ? current.bids : current.asks)]
-    if (operation === 2) {
-      levels.splice(position, 1)
-    } else {
-      const level = {
-        price,
-        size,
-        ...(marketMaker ? { marketMaker } : {}),
-      }
-      if (operation === 0) levels.splice(position, 0, level)
-      else levels[position] = level
-    }
-    const bids = side === 1 ? levels.slice(0, subscription.rows) : current.bids
-    const asks = side === 0 ? levels.slice(0, subscription.rows) : current.asks
-    const usable = [...bids, ...asks].some(
-      (level) =>
-        Number.isFinite(level.price) &&
-        level.price > 0 &&
-        Number.isFinite(level.size) &&
-        level.size > 0,
-    )
-    const localDiagnostic =
-      current.diagnostic?.message === DEPTH_PENDING_MESSAGE ||
-      current.diagnostic?.message === DEPTH_NO_RESPONSE_MESSAGE
-    const recoveredDiagnostic = [316, 317, 1101].includes(current.diagnostic?.code ?? 0)
-    if (usable) this.clearDepthPendingTimeout()
-    this.store.setMarketDepth({
-      ...current,
-      symbol: subscription.symbol,
-      bids,
-      asks,
-      diagnostic:
-        usable && (localDiagnostic || recoveredDiagnostic) ? undefined : current.diagnostic,
-      updatedAt: new Date().toISOString(),
-    })
-  }
-
-  private clearDepthPendingTimeout(): void {
-    if (this.depthPendingTimer) clearTimeout(this.depthPendingTimer)
-    this.depthPendingTimer = undefined
-  }
-
-  private armDepthPendingTimeout(reqId: number): void {
-    this.clearDepthPendingTimeout()
-    this.depthPendingTimer = setTimeout(() => {
-      this.depthPendingTimer = undefined
-      if (this.marketDepthSubscription?.reqId !== reqId) return
-      const depth = this.store.getState().marketDepth
-      if (!depth || depth.diagnostic?.message !== DEPTH_PENDING_MESSAGE) return
-      // This is a local observation of silence, not an invented provider error.
-      this.store.setMarketDepth({
-        ...depth,
-        diagnostic: { message: DEPTH_NO_RESPONSE_MESSAGE },
-      })
-    }, 15_000)
-    this.depthPendingTimer.unref()
-  }
-
-  private restoreMarketDepth(message: string, code?: number): void {
-    const active = this.desiredMarketDepth
-    if (!active) return
-    if (this.marketDepthSubscription)
-      this.ib.cancelMktDepth(this.marketDepthSubscription.reqId, true)
-    const reqId = this.allocateRequestId()
-    this.marketDepthSubscription = { ...active, reqId }
-    this.store.setMarketDepth({
-      symbol: active.symbol,
-      bids: [],
-      asks: [],
-      updatedAt: new Date().toISOString(),
-      diagnostic: {
-        message: code == null ? DEPTH_PENDING_MESSAGE : message,
-        ...(code == null ? {} : { code }),
-      },
-    })
-    this.armDepthPendingTimeout(reqId)
-    this.ib.reqMktDepth(reqId, toIbContract(active.symbol), active.rows, true, [])
   }
 
   private invalidateMarketSubscriptions(message: string): void {
-    this.clearDepthPendingTimeout()
     const cancelActive = this.ib.isConnected
     this.quotes.clearQuoteSubscriptions(message, cancelActive)
     this.options.optionQuoteStreams.suspend(cancelActive)
-    if (cancelActive && this.marketDepthSubscription)
-      this.ib.cancelMktDepth(this.marketDepthSubscription.reqId, true)
-    const depth = this.store.getState().marketDepth
-    if (depth)
-      this.store.setMarketDepth({
-        symbol: depth.symbol,
-        bids: [],
-        asks: [],
-        updatedAt: depth.updatedAt,
-        diagnostic: { message },
-      })
-    this.marketDepthSubscription = undefined
+    this.streams.invalidate(message)
   }
 
   private restoreDesiredMarketSubscriptions(
@@ -1203,25 +1009,7 @@ export class IbkrService {
   ): void {
     this.quotes.restore()
     this.options.restoreQuoteStreams()
-    this.restoreMarketDepth(message, code)
-    this.restoreTape()
-  }
-
-  private restoreTape(): void {
-    const active = this.tapeSubscription
-    if (!active) return
-    this.ib.cancelTickByTickData(active.reqId)
-    const reqId = this.allocateRequestId()
-    this.tapeSubscription = { ...active, reqId }
-    this.tapePrints = []
-    this.tapeSequence = 0
-    this.ib.reqTickByTickData(
-      reqId,
-      toIbContract(active.symbol),
-      TickByTickDataType.AllLast,
-      0,
-      false,
-    )
+    this.streams.restore(message, code)
   }
 
   private allocateRequestId(): number {
@@ -1278,11 +1066,27 @@ export class IbkrService {
     }
   }
 
-  private requestHistoricalBars(
+  private async requestHistoricalBars(
     contract: Contract,
     request: { endDateTime: string; duration: string; barSize: BarSizeSetting },
   ): Promise<MarketBar[]> {
-    return this.requests.requestHistoricalBars(contract, request)
+    try {
+      return await this.requests.requestHistoricalBars(contract, request)
+    } catch (error) {
+      // Observed: while IBKR reports 10197 to this session, history requests go unanswered.
+      if (
+        error instanceof MarketDataError &&
+        error.code === 'market-data-timeout' &&
+        this.quotes.competingLiveSessionReported()
+      ) {
+        throw new MarketDataError(
+          503,
+          'market-data-competing-session',
+          `IBKR sent no chart history for ${contract.symbol ?? 'this symbol'} while it reports a competing live session (IBKR 10197). Restart TWS or IB Gateway and log in again; if this persists, sign out of IBKR Mobile, Client Portal and any other IBKR login.`,
+        )
+      }
+      throw error
+    }
   }
 
   private requestHistoricalSchedule(

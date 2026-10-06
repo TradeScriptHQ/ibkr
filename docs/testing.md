@@ -41,7 +41,9 @@ Broker scenarios are grouped by workflow:
 
 - `gateway-readonly`: authentication, CSRF, refresh/revocation, configured readiness and lease,
   account reconciliation, stock search/resolve/history/quotes/calendar, real option contract
-  discovery/resolution, depth/tape diagnostics, WebSocket snapshot, and invalid-preview guards.
+  discovery/resolution, depth/tape diagnostics, independent per-window order books (two
+  symbols at once, release without disturbing the other), WebSocket snapshot, and
+  invalid-preview guards.
 - `terminal-ui`: native ticket types/durations, analysis and account navigation, account values
   against gateway state, usable viewport bounds, fundamentals close/add/symbol switching and
   reload persistence, selected option-query refresh, and actual connection status.

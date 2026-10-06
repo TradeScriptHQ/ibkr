@@ -94,3 +94,65 @@ it('returns no more than the requested number of newest historical bars', async 
   expect(bars.map((bar) => bar.close)).toEqual([6.5, 7.5, 8.5, 9.5, 10.5])
   expect(hasOlder).toBe(true)
 })
+
+it('explains unanswered history with a competing live session only while a quote stream reports it', async () => {
+  vi.useFakeTimers()
+  try {
+    const ib = Object.assign(new EventEmitter(), {
+      reqMktData: vi.fn(),
+      cancelMktData: vi.fn(),
+      reqMarketDataType: vi.fn(),
+      reqHistoricalData: vi.fn(),
+      cancelHistoricalData: vi.fn(),
+    })
+    const store = new BrokerStateStore()
+    store.setConnectionStatus('connected')
+    const service = new IbkrService(
+      createBridgeConfig(loadGatewayConfig({})),
+      store,
+      ib as unknown as IBApi,
+    )
+    const symbol = {
+      symbol: 'AAPL',
+      exchange: 'SMART',
+      primaryExchange: 'NASDAQ',
+      currency: 'USD',
+      assetClass: 'stock',
+    }
+    const history = () => service.loadBars({ ...symbol, interval: '5m', barCount: 50 })
+    const quoteId = () => ib.reqMktData.mock.calls.at(-1)?.[0] as number
+
+    service.getQuotes([symbol])
+    expect(service.competingLiveSessionReported()).toBe(false)
+    ib.emit(
+      EventName.error,
+      new Error('No market data during competing live session'),
+      10197,
+      quoteId(),
+    )
+    expect(service.competingLiveSessionReported()).toBe(true)
+
+    // The quote retry at 15 seconds keeps the reported cause on the new stream.
+    const blocked = expect(history()).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'market-data-competing-session',
+      message: expect.stringContaining(
+        'competing live session (IBKR 10197). Restart TWS or IB Gateway',
+      ),
+    })
+    await vi.advanceTimersByTimeAsync(20_000)
+    await blocked
+    expect(service.competingLiveSessionReported()).toBe(true)
+
+    ib.emit(EventName.tickPrice, quoteId(), 1, 250)
+    expect(service.competingLiveSessionReported()).toBe(false)
+    const timedOut = expect(history()).rejects.toMatchObject({
+      statusCode: 504,
+      code: 'market-data-timeout',
+    })
+    await vi.advanceTimersByTimeAsync(20_000)
+    await timedOut
+  } finally {
+    vi.useRealTimers()
+  }
+})

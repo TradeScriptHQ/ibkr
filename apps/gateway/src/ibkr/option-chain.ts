@@ -18,6 +18,16 @@ export type ResolvedOptionQuoteContract = Contract & {
   priceIncrements?: Array<{ lowEdge: number; increment: number }> | undefined
 }
 
+/**
+ * ContractDetails can append the last-trade time and zone to the expiry
+ * ("20261007 16:00:00 US/Eastern"). stoqey/ib 1.6.7 splits it on the literal string
+ * "\\s+", so the suffix survives, and IBKR rejects it on the market-data wire (10372).
+ */
+export function withWireOptionExpiry<T extends Contract>(contract: T): T {
+  const expiry = contract.lastTradeDateOrContractMonth?.trim().split(/\s+/)[0]
+  return expiry ? { ...contract, lastTradeDateOrContractMonth: expiry } : contract
+}
+
 /** Neither a tuple nor a caller-supplied conId authorizes choosing an arbitrary class. */
 export function selectExactOptionDetails(
   details: ContractDetails[],

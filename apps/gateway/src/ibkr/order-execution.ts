@@ -34,7 +34,7 @@ import {
 import { opposingForecastContract } from './forecast-contracts.js'
 import type { IbkrRequests } from './ibkr-requests.js'
 import { nativeMonetaryUnits } from './monetary-units.js'
-import { positiveContractId } from './numbers.js'
+import { positiveContractId, positiveNumber } from './numbers.js'
 import { optionContractWithSourceIdentity, selectExactOptionDetails } from './option-chain.js'
 import { OrderPreviews } from './order-previews.js'
 import {
@@ -54,6 +54,7 @@ import {
   hasStrategyLegs,
   ibkrOrderModificationRejection,
   mapOrderStatus,
+  parseIbExecutionTime,
   strategyLegsForDraft,
   strategyOrderQuantity,
   toExitChildOrder,
@@ -260,7 +261,15 @@ export class OrderExecution {
         if (orderId === undefined || !Number.isInteger(orderId) || orderId === 0)
           incoming.brokerOrderId = existing?.brokerOrderId
         const status = reconciledOrderStatus(existing?.status, completedOrderStatus(orderState))
-        const quantity = incoming.quantity > 0 ? incoming.quantity : (existing?.quantity ?? 0)
+        // Completed-order readback reports totalQuantity 0; a filled order's size is its fill.
+        const quantity =
+          positiveNumber(incoming.quantity) ??
+          positiveNumber(existing?.quantity) ??
+          (status === 'filled' ? positiveNumber(ibOrder.filledQuantity) : undefined) ??
+          0
+        const completedAt = orderState.completedTime
+          ? parseIbExecutionTime(orderState.completedTime)
+          : undefined
         const filledQuantity =
           status === 'filled'
             ? Math.max(existing?.filledQuantity ?? 0, quantity)
@@ -300,8 +309,12 @@ export class OrderExecution {
             ibkrSecurityType: contract.secType,
           },
           message: incoming.message,
-          submittedAt: existing?.submittedAt ?? incoming.submittedAt,
-          updatedAt: new Date().toISOString(),
+          // IBKR does not report when a completed order was submitted; never stamp the readback time.
+          submittedAt: existing?.submittedAt ?? recovered?.submittedAt,
+          updatedAt:
+            completedAt === undefined
+              ? (existing?.updatedAt ?? new Date().toISOString())
+              : new Date(completedAt).toISOString(),
         })
         this.recordOwnedReadback(incoming.id)
       },
@@ -755,7 +768,7 @@ export class OrderExecution {
     // Parent combo quantity cannot be reconstructed by summing its individual leg executions.
     if (multiLeg && !hasCumulativeQuantity) return
 
-    const submittedAt = Date.parse(order.submittedAt)
+    const submittedAt = order.submittedAt === undefined ? Number.NaN : Date.parse(order.submittedAt)
     const related = this.store.getState().executions.filter((candidate) => {
       const orderMatches = candidate.orderId === order.id
       const accountMatches =
@@ -813,7 +826,8 @@ export class OrderExecution {
       remainingQuantity,
       avgFillPrice,
       message: status === 'filled' ? undefined : order.message,
-      updatedAt: new Date().toISOString(),
+      // Executions replayed after a restart do not change when a completed order last changed.
+      updatedAt: active ? new Date().toISOString() : order.updatedAt,
     })
     if (status !== order.status) {
       const fillText = avgFillPrice !== undefined ? ` at ${avgFillPrice}` : ''

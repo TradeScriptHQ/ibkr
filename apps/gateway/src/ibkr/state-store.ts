@@ -35,6 +35,8 @@ export class BrokerStateStore {
   }
 
   private readonly listeners = new Set<Listener>()
+  private readonly unsettledMarketDepths = new Set<string>()
+  private marketDepthEmit: ReturnType<typeof setImmediate> | undefined
 
   getState(): BrokerState {
     return this.state
@@ -160,9 +162,36 @@ export class BrokerStateStore {
     return true
   }
 
+  marketDepth(streamId: string): MarketDepth | undefined {
+    return this.state.marketDepths?.find((depth) => depth.streamId === streamId)
+  }
+
   setMarketDepth(marketDepth: MarketDepth): void {
-    this.patchState({ marketDepth })
-    this.emit({ type: 'market-depth', marketDepth, timestamp: now() })
+    const others = (this.state.marketDepths ?? []).filter(
+      (depth) => depth.streamId !== marketDepth.streamId,
+    )
+    this.patchState({ marketDepths: [...others, marketDepth] })
+    // IBKR delivers one book change as a burst of level operations. Reads stay current, but
+    // clients get each settled book once per event-loop turn, never the in-between states.
+    this.unsettledMarketDepths.add(marketDepth.streamId)
+    if (this.marketDepthEmit) return
+    this.marketDepthEmit = setImmediate(() => {
+      this.marketDepthEmit = undefined
+      const streamIds = [...this.unsettledMarketDepths]
+      this.unsettledMarketDepths.clear()
+      for (const streamId of streamIds) {
+        const settled = this.marketDepth(streamId)
+        if (settled) this.emit({ type: 'market-depth', marketDepth: settled, timestamp: now() })
+      }
+    })
+  }
+
+  removeMarketDepth(streamId: string): void {
+    if (!this.marketDepth(streamId)) return
+    this.unsettledMarketDepths.delete(streamId)
+    this.patchState({
+      marketDepths: (this.state.marketDepths ?? []).filter((depth) => depth.streamId !== streamId),
+    })
   }
 
   invalidatePortfolio(accountId: string): void {

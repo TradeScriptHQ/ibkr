@@ -13,6 +13,7 @@ function fixture(
     validStrikes?: (expiration: string) => number[]
     tradingClasses?: string[]
     marketRuleIds?: string
+    providerExpiry?: (expiration: string) => string
   } = {},
 ) {
   const store = new BrokerStateStore()
@@ -90,7 +91,7 @@ function fixture(
             localSymbol: `AAPL ${expiration} ${right} ${strike}`,
             tradingClass: contract.tradingClass,
             secType: SecType.OPT,
-            lastTradeDateOrContractMonth: expiration,
+            lastTradeDateOrContractMonth: options.providerExpiry?.(expiration) ?? expiration,
             strike,
             right,
             multiplier: 100,
@@ -171,6 +172,20 @@ describe('option strike catalog and quote budget', () => {
     const chain = await service.getOptionChain({ ...request, maxQuoteContracts: 80 })
     expect(reqMktData).toHaveBeenCalledTimes(80)
     expect(chain.expirations[0].contracts.filter((row) => row.bid !== undefined)).toHaveLength(80)
+  })
+
+  it('sends a date-only expiry when IBKR appends the last-trade time and zone', async () => {
+    const { service, reqMktData } = fixture(316.22, {
+      providerExpiry: (expiration) => `${expiration} 16:00:00 US/Eastern`,
+    })
+    const chain = await service.getOptionChain(request)
+    expect(reqMktData).toHaveBeenCalledTimes(40)
+    expect(
+      reqMktData.mock.calls.every(
+        ([, contract]) => contract.lastTradeDateOrContractMonth === '20260909',
+      ),
+    ).toBe(true)
+    expect(chain.expirations[0]?.contracts.filter((row) => row.bid !== undefined)).toHaveLength(40)
   })
 
   it('quotes the full selected expiry when no window is requested', async () => {

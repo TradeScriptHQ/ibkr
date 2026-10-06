@@ -27,7 +27,10 @@ vi.mock('./watchlist.js', () => ({ createLocalWatchlistAdapter: mocks.watchlist 
 vi.mock('./mcp/browser-bridge.js', () => ({ connectTradeScriptMcp: mocks.mcp }))
 vi.mock('./risk.js', () => ({ createConnectionRiskAuthority: mocks.risk }))
 vi.mock('./workstation-authorization.js', () => ({ authorizeWorkstation: mocks.authorize }))
-vi.mock('./terminal-session.js', () => ({ createTerminalTradeScriptSdk: mocks.sdk }))
+vi.mock('./terminal-session.js', () => ({
+  createTerminalTradeScriptSdk: mocks.sdk,
+  currentCsrfToken: () => undefined,
+}))
 vi.mock('./workstation-e2e.js', () => ({
   removeWorkstationE2e: mocks.remove,
   installWorkstationE2e: vi.fn(),

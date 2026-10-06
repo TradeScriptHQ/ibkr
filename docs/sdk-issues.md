@@ -626,3 +626,340 @@ verification gates; source fixes alone do not close their release qualification.
 - **Package boundary:** Implemented in upstream SDK source consumed by this
   development terminal. No consumer layout override or new prop is required.
   The installed and published SDK packages are unchanged.
+
+## Account visibility menus did not match SDK dropdown styling
+
+- **Issue:** Header Metrics and Columns rendered native browser checkboxes,
+  bypassing SDK menu styling. Header Metrics used a separate popup
+  treatment, while Columns expanded into an inline strip instead of a dropdown.
+- **SDK change (2026-10-05):** Both controls now use one compact checkbox menu
+  with the P&L select's surface, border, radius and menu-row theme classes. An
+  anchored portal carries theme tokens into the popup. Both menus share the P&L
+  select's trailing checkmark artwork and use its surface and text theme tokens,
+  without boxed checkboxes. Checkmarks alone identify checked items; their normal
+  row background stays unchanged, with fill appearing only on hover through the
+  SDK's existing menu hover theme. Multiple-selection checkbox semantics remain
+  intact. Selections remain open for multiple changes; keyboard navigation skips disabled items, Space
+  toggles a choice, and Escape restores focus to the trigger. Existing menu and
+  trigger slots, controller ownership and visibility persistence remain wired.
+- **Visibility correction:** Toggling now inverts the resolved column state,
+  including broker metadata's `hidden: true`, rather than requiring a previously
+  saved visibility entry. Realized can therefore be enabled on its first toggle.
+  Multi-table selections remain independent and `notHideable` columns stay fixed.
+- **Rendered verification:** Both menus display themed trailing checkmarks in the
+  native development Terminal. Realized was enabled and restored to its original
+  unchecked state. A rendered SDK panel with explicitly synthetic data confirms
+  24px rows, a 10px themed radius, theme colours carried into the portal, multiple
+  selections, keyboard toggling and Escape focus restoration. No broker orders
+  were changed.
+- **Hover follow-up verification:** An isolated SDK menu preview with synthetic
+  selections and the Terminal theme confirms that checked rows have transparent
+  backgrounds, while a hovered checked row uses `ui.surface.hoverBackground`.
+  Rows remain 24px high. Native verification of this follow-up was unavailable:
+  the development Terminal was blank and its existing dev server was no longer
+  listening. User processes were not restarted.
+- **Regression gates:** All **324** tests in the six affected/related files pass;
+  the latest broad SDK run passes **8,658** tests in **882** files. SDK type checking and
+  CSS compilation, **575** website tests and **442** deployment-script tests pass.
+  One broker-ticket timing assertion failed during the concurrent focused run;
+  its complete 258-test file passed on an isolated rerun, as did the broad suite.
+  The normal Terminal check is blocked by three installed-package type errors
+  for the earlier `showAccountTitle` change and a separate datafeed argument
+  mismatch; it does not reach the later gates.
+- **Package boundary:** Implemented in the upstream SDK source configured for
+  the development Terminal. No consumer CSS override or new consumer prop is needed.
+  The installed and published SDK packages are unchanged.
+
+## Unavailable-market-data state cannot explain the failure (2026-10-05)
+
+- **Installed package:** `@tradescript/pro` alias of
+  `@tradescript/pro-developer-console-free`, version `0.1.34`.
+- **Affected API / reproduction:** When initial history or symbol resolution
+  fails, the chart shows "Market data unavailable … Try another symbol" for every
+  cause. `features.invalidSymbol.title`/`message` are read once at mount, and the
+  datafeed's error never reaches the card. With IBKR reporting a competing live
+  session (10197), every symbol timed out while the card suggested choosing
+  another one.
+- **Upstream source change:** `SdkError` accepts an optional fourth argument,
+  `{ presentation: { title, message } }` (`SdkErrorOptions`,
+  `SdkErrorPresentation`). The datafeed adapter and initial symbol resolution
+  copy it from the thrown error to `ChartError.presentation`. The
+  unavailable-market-data state shows it instead of the configured or locale
+  copy. Error `message` text is still never rendered.
+- **Consumer application:** The gateway returns typed `market-data-competing-session`,
+  `market-data-timeout` and `market-data-rejected` codes for chart history. The
+  datafeed maps them to a heading and recovery step; a rejection shows IBKR's
+  reason. The header shows "Market data blocked" while an active quote stream
+  reports 10197.
+- **Verification:** The complete affected SDK files pass **43** tests. The full
+  SDK run passes **8,655** of **8,657**: the regenerated export audit now passes,
+  and a trading-facade test that timed out under full-suite load passes **8/8**
+  on its own. SDK type checking and source type checking for the consumer
+  application and E2E pass. All **441** terminal tests pass. The gateway passes
+  **712** of **718**; the six failures are the existing
+  broker-runtime/connection-manager tests. Against a real paper IB Gateway
+  reporting 10197, the chart card reads "IBKR is withholding market data" and
+  the header reads "Market data blocked". That 10197 was a stale IB Gateway
+  session: no other IBKR login existed, and restarting IB Gateway restored quotes
+  and history, so the copy leads with restarting and logging in again.
+- **Release status:** Local SDK source change, unpublished. Installed `0.1.34`
+  declarations reject the fourth `SdkError` argument, so `npm run typecheck`
+  adds one error in `apps/terminal/src/ibkr/datafeed-requests.ts` to the three
+  existing `showAccountTitle` errors. At runtime the packaged SDK ignores the
+  argument and keeps its generic card. The gateway codes and header state need
+  no SDK release.
+
+## Compact account-table density (2026-10-05)
+
+- **Installed package:** `@tradescript/pro` alias of
+  `@tradescript/pro-developer-console-free`, version `0.1.34`.
+- **Affected API / reproduction:** Account panel desk tables use 8px cell
+  padding and `sm` row-action buttons. A position row with a Close button is
+  49px tall, and no public option changes it. `cn` does not merge conflicting
+  utilities, so host slot classes cannot reliably shrink the button padding.
+- **Upstream source change:** `accountPanelOptions.density` accepts
+  `'comfortable'` (default, unchanged classes, the watchlist's name) or
+  `'compact'`. Compact uses 4px cell and header padding, 2px in the action
+  cell, and `xs` row-action buttons. Expanded position executions follow the
+  same density; phone card rows keep their spacing. Slot classes still apply in
+  both densities.
+- **Consumer application:** The Terminal requests `density: 'compact'`.
+- **Verification:** The complete `brokerWidgets.functional.test.tsx` file passes
+  **259** tests, including the new density test. SDK type checking and the
+  export-audit test pass after regenerating the SDK reference. The two Terminal
+  workstation files pass **26** tests. In the running development Terminal at
+  desktop width, the header is 24.5px and every position row is 31px, down
+  from 49px.
+- **Release status:** Local SDK source change, unpublished. Installed `0.1.34`
+  declarations reject `density`, adding one `npm run typecheck` error in
+  `apps/terminal/src/workstation-widgets.test.ts`. The `workstation-widgets.ts`
+  object already fails on `showAccountTitle`, which ships in the same release.
+
+## Quiet account-table row actions (2026-10-05)
+
+- **Installed package:** `@tradescript/pro` alias of
+  `@tradescript/pro-developer-console-free`, version `0.1.34`.
+- **Affected API / reproduction:** Account-table Close and Cancel use
+  `secondary` buttons with the negative tone, so they take the global
+  `ui.buttonNegative` tokens. The Terminal maps that group to its grey secondary
+  button, which gives every row a filled, bordered pill. Hosts cannot restyle
+  only row actions: `buttonNegative` also styles Sell and other destructive
+  buttons, inline slot styles remove hover, and slot classes do not reliably
+  outrank the tone class.
+- **Upstream source change:** `StandardButton` gains `variant="quiet"`, which
+  is text-only at rest with a fill under the pointer; `tone="negative"` turns
+  the hover red. Account-table row actions on desk use it. Phone card actions
+  keep bordered buttons because touch has no hover. New theme groups
+  `ui.buttonQuiet` and `ui.buttonQuietNegative` (`--ts-chart-button-quiet-*`)
+  restyle only quiet buttons. Built-in presets project them as references to
+  their surface and negative tokens, so layered host themes recolor them too.
+- **Consumer application:** No Terminal change. Quiet buttons follow the
+  Terminal's surface muted text at rest and its negative tokens on hover.
+- **Verification:** The full SDK run passes **8,661** tests, and SDK type
+  checking passes. The token drift, projection, CSS-variable documentation and
+  contrast gates pass. The SDK docs audit reports only another change's
+  undocumented `RiskOrderLegExposure` fields. In the running development
+  Terminal, Close renders in muted text without a fill or border; hovering
+  shows the negative text on a 10% negative tint.
+- **Release status:** Local SDK source change, unpublished. It adds no consumer
+  API, so installed `0.1.34` keeps the filled buttons without new type errors.
+
+## Order Book rows flicker on depth updates (2026-10-05)
+
+- **Installed package:** `@tradescript/pro` alias of
+  `@tradescript/pro-developer-console-free`, version `0.1.34`.
+- **Affected API / reproduction:** With `marketDepthOptions.levelExtension` set,
+  rows flicker on every book change, and the MID separator briefly appears
+  above the best level. Rows were keyed by their bid/ask prices, so each price
+  change remounted the row. The DOM extension host mounted extensions in a
+  passive effect, so each remounted row painted one empty frame before its
+  default content appeared.
+- **Upstream source change:** Order-book rows are keyed by book position and
+  update in place. `TradeScriptDomExtensionHost` mounts and updates extensions
+  in a layout effect, so default content is placed before paint for every DOM
+  extension.
+- **Consumer application:** The gateway publishes one settled
+  `market-depth` event per event-loop turn instead of one per IBKR level
+  operation. Live BTC depth fell from 825 to 65 events in 20 seconds. The
+  Terminal's depth-row extension writes its notice text, title, and `hidden`
+  state only when they change.
+- **Verification:** New SDK tests fail on the old code and pass on the fix. All
+  **8,663** SDK tests pass, and SDK type checking passes. All **441** Terminal
+  tests pass; the gateway passes **713** of **719**, and the six failures are
+  the existing broker-runtime/connection-manager tests. In the running
+  Terminal, 20 seconds of live BTC depth kept the same 10 row elements, with
+  only text and size-bar style changes, and MID never rendered above the best
+  level.
+- **Release status:** Local SDK source change, unpublished; it adds no consumer
+  API. Installed `0.1.34` keeps the row remounts until a release includes it.
+  The gateway batching and extension writes apply without an SDK release.
+
+## Time & Sales time, size, and side display (2026-10-05)
+
+- **Installed package:** `@tradescript/pro` alias of
+  `@tradescript/pro-developer-console-free`, version `0.1.34`.
+- **Affected API / reproduction:** Every Time & Sales time rendered as `000`. The
+  formatter named only `fractionalSecondDigits`, so `toLocaleTimeString` dropped hour,
+  minute, and second. A print without an aggressor rendered as `between`, which no
+  feed reported. `TimeAndSalesEntry.size` was required, so a feed could not mark an
+  unreported quantity.
+- **Upstream source change:** The time formatter requests hour, minute, and second.
+  `TimeAndSalesEntry.size` and the print render/extension context `aggressor` are
+  optional, and the widget renders a missing size or side as `—`. Prints of unknown
+  size fail a positive minimum-size filter and add no order-flow or footprint volume.
+  The agentic print contract no longer requires `size`; the MCP operation catalog was
+  regenerated from source.
+- **Consumer application:** IBKR's tick-by-tick crypto prints report a size of 1 on
+  every trade, while the quote stream carries the real fractional sizes (for example
+  0.0002 BTC). The gateway therefore omits `size` on crypto tape prints.
+- **Verification:** The complete Time & Sales widget/controller files pass **16**
+  tests. The full SDK run passes **8,663** tests; a trading-facade timeout under
+  load passes **8/8** alone. SDK type checking passes. The `gateway-readonly` paper
+  spec passes **11/11**, including a new check that BTC prints carry real timestamps
+  and no placeholder size. The running Terminal shows ETH prints as
+  `14:29:21.000 | — | 2,715.00 | — | —`. The MCP suite's channel-count test
+  expects 38 channels but finds 39 in the current SDK source, with or without
+  this change.
+- **Release status:** Local SDK source change, unpublished. Installed `0.1.34`
+  still shows `000` and `between`. Its quantity formatter calls `toLocaleString` on
+  the size, so it throws on a crypto print without one. Ship this gateway change
+  only with an SDK release that includes the optional size; `npm run check` already
+  stops packaged builds at the SDK boundary.
+
+## Account notification toasts are tinted by severity (2026-10-05)
+
+- **Installed package:** `@tradescript/pro` alias of
+  `@tradescript/pro-developer-console-free`, version `0.1.34`.
+- **Affected API / reproduction:** The account panel shows each new
+  `TradingState.messages` entry as a toast. Its border and text use the severity
+  color: `--ts-chart-accent`, `--ts-chart-warning` or `--ts-chart-negative`. The
+  Terminal's accent is neutral grey, so an order-fill notice renders as grey
+  text in a bright outlined box. The toast has no icon or time, and errors are
+  announced as `status`, not `alert`.
+- **Upstream source change:** The toast uses the modal surface tokens for its
+  background, border and text. Severity is shown by an icon in the same three
+  tokens, with no colored edge. `TradingMessage.time` renders as a muted local
+  time. Errors use `role="alert"`, and each new notice fades in over 160 ms.
+  Reduced motion turns the fade off. No theme tokens were added, and the
+  `message` slot class and style still apply to the toast.
+- **Related change:** A position's expanded fills no longer have a 2px
+  positive-color rule on their left, which showed green even for short
+  positions. On desktop, the fills start under the position's symbol and sit on
+  a band at 60% of `--ts-chart-surface-hover-bg`. The phone card keeps them
+  unindented. The `positionExecutionPanel` slot still applies.
+- **Consumer application:** No Terminal change.
+- **Verification:** SDK type checking passes. The account-panel functional tests,
+  widget token references, theme, contrast and package-boundary files pass
+  **692** tests. After removing both edges, the trading widget, token-reference
+  and theme files pass **642** tests. A static preview with the Terminal's dark
+  tokens showed the toasts and the expanded fills.
+- **Release status:** Local SDK source change, unpublished; it adds no consumer
+  API. Installed `0.1.34` keeps the tinted outline toast.
+
+## Fundamentals rows do not match the Watchlist (2026-10-05)
+
+- **Installed package:** `@tradescript/pro` alias of
+  `@tradescript/pro-developer-console-free`, version `0.1.34`.
+- **Affected API / reproduction:** In a docked Fundamentals widget, every field
+  paints `--ts-chart-surface-bg` and a 1px divider on its right and bottom
+  edges. The Terminal's surface background is darker than its panel, so the
+  rows form a dark block with a rule down the right side. Next to it, Watchlist
+  rows sit on the panel. Section headers render in 10px tracked capitals.
+- **Upstream source change:** In `FundamentalsWidget.css`, fields have no
+  background of their own and only a bottom divider; hover is unchanged.
+  Labels start 16px in, as Watchlist symbols do. Side-by-side columns are
+  separated by cell padding, with no vertical rule. The sticky section header
+  keeps `--ts-chart-control-bg`, uses 12px semibold `--ts-chart-surface-text`
+  with its count in subtle text, and has a divider below. No tokens were added.
+  The responsive column changes already in the same file are unchanged.
+- **Consumer application:** No Terminal change.
+- **Verification:** The Fundamentals widget and widget token-reference files
+  pass **10** tests. A static preview with the Terminal's dark tokens showed the
+  Watchlist next to the old and new Fundamentals panels.
+- **Release status:** Local SDK source change, unpublished; it adds no consumer
+  API. Installed `0.1.34` keeps the dark field block.
+
+## Chart fill labels overlap and overflow (2026-10-05)
+
+- **Installed package:** `@tradescript/pro` alias of
+  `@tradescript/pro-developer-console-free`, version `0.1.34`.
+- **Affected API / reproduction:** Each fill draws a transparent card with a
+  bright 1px border and white text. Its width is estimated at 5.8px per
+  character, so text runs past the border. Only fills on the same bar stack, so
+  labels on nearby bars overlap whenever their cards are wider than the bar
+  gap. The default arrow is a white 35px line with two 6px arms, which reads as
+  a stick and disappears on light charts.
+- **Upstream source change:** Labels measure their text and draw a filled,
+  rounded card: buy/sell color for the title, light muted text for the detail.
+  New defaults are an opaque `rgb(17, 19, 26)` background, a faint white border,
+  `#22c55e` buy, `#ef4444` sell and an 11px font. The default arrow is one solid
+  outlined shape, 18px tip to tail, with its tip on the fill. It uses the
+  buy/sell color unless `arrowColor` is set. New public field
+  `BrokerExecutionLinePresentation.labelPeers` (`BrokerExecutionMarkerPeer[]`):
+  the trading sync passes every fill marker on the chart. Each marker places
+  its label against its neighbours at the current zoom. Labels that would
+  overlap move away from their markers, left to right, just far enough to clear
+  the labels already placed. Each fill keeps its own card, centred under its
+  own arrow. A moved card has a faint connector back to its arrow. Each marker
+  draws separately, and later markers can draw over earlier ones, so a single
+  line would show through the cards above it. The connector is therefore drawn
+  only in the gaps between those cards, so it looks like it runs behind them.
+  (An earlier draft merged overlapping fills into one summary card; that was
+  rejected, and fills are never combined.) The default card background is
+  opaque (`rgb(17, 19, 26)`), so nothing shows through a label. Without `labelPeers`, or with a non-`always` label policy,
+  `stackIndex` stacking applies as before. Style
+  docs for `lineWidth`, `arrowLength` and `arrowHeadSize` describe the new
+  arrow. The generated SDK reference was regenerated.
+- **Consumer application:** No Terminal change.
+- **Verification:** SDK type checking passes, the public API facade and
+  SDK-reference checks pass, and execution-marker tests cover shared, member,
+  hovered and isolated labels. The full SDK run passed **8,665** tests before
+  the arrow change. After it, **8,663** passed. The two failures
+  (`ChartDataTable`, `tradingSessionFacade.authorization`) pass alone and fail
+  only under full-suite load. After the final layout change, all **8,667**
+  pass. On the live paper MSFT chart, five nearby buys render as five separate
+  cards packed directly below one another, and isolated fills keep their cards
+  beside compact arrows.
+- **Entry/Exit labels:** The trading sync marked every sell `SHORT` and every
+  buy `LONG`, so every fill read "Entry", and a sell closing a long showed
+  "SHORT Entry". The sync now sets `side` and a new optional `positionEffect`
+  (`entry`, `exit`, `reverse` or `unknown`) on the presentation and its peers.
+  It works these out per account. The starting position is the current broker
+  position minus every fill on the symbol, and the fills are replayed in time
+  order. A fill without a time, or an option position on the symbol, makes the
+  effect `unknown`, which labels the fill `Buy` or `Sell`. A fill that crosses
+  zero reads `Reverse to SHORT` or `Reverse to LONG`. Without `positionEffect`,
+  titles pair `side` with the fill direction as before. A new trading test
+  replays a close, a reopen, a reversal and a partial cover. On the live paper
+  MSFT chart, the 15:30 sell reads `LONG Exit`. The full SDK run passes
+  **8,666** of **8,667**. The only failure,
+  `tradingSessionFacade.authorization`, passes **8/8** alone.
+- **Release status:** Local SDK source change, unpublished. `labelPeers` is
+  additive; installed `0.1.34` keeps the old labels and arrows.
+
+## Position line pill reads as one bright block (2026-10-05)
+
+- **Installed package:** `@tradescript/pro` alias of
+  `@tradescript/pro-developer-console-free`, version `0.1.34`.
+- **Affected API / reproduction:** With the surface position renderer (the
+  workstation's default), the position pill (`LONG Entry | 6 | @ $526.64 |
+  EUR +11.82 | ×`) has a full-strength border in the P&L color. Every segment is
+  side-colored text between dividers. A losing position turns the whole pill
+  red: text, background and close button.
+- **Upstream source change:** `ChartTradingOrderLayer` draws the pill on the
+  dark surface with a border at 45% of the line tone. Inside are a `LONG` or
+  `SHORT` tag tinted with the side color, the quantity in surface text at weight
+  600, `@ $price` in muted text, and the P&L as a chip tinted with the gain or
+  loss color. The P&L chip is the only part that changes color with P&L. The
+  line and border still follow the existing P&L tone. Dividers remain only
+  before the status badge and actions, and action icons are muted. Existing
+  style overrides (`bodyTextColor`, `bodyBorderColor`, `quantityTextColor`,
+  `pnlBackgroundColor`, button colors, visibility flags) still take
+  precedence. The canvas `positionEntryLine` renderer is unchanged.
+- **Consumer application:** No Terminal change.
+- **Verification:** `ChartTradingOrderLayer` tests pass **21/21**, with the pill
+  test updated to the new design. SDK type checking passes. The full SDK run
+  passes **8,666** of **8,667**; `ChartDataTable` fails only under full-suite
+  load and passes alone. The live paper MSFT chart shows the tag, `6 @ $526.64`
+  and a green `EUR +12.25` chip.
+- **Release status:** Local SDK source change, unpublished; no API change.

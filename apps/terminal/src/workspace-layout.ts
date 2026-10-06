@@ -67,6 +67,8 @@ export function arrangeDesktopWorkstation(
   move('order-ticket', 'chart', 'right')
   move('account', 'chart', 'below')
   move('watchlist', 'chart', 'left')
+  // Instrument facts follow the selected symbol, so they sit under the list that selects it.
+  move('fundamentals', 'watchlist', 'below')
   move('market-depth', 'account', 'right')
   move('agent-console', 'order-ticket', 'within')
 
@@ -91,13 +93,19 @@ export function arrangeDesktopWorkstation(
 
   schedule(() => {
     // Keep alternate tools beside their primary surface rather than consuming a grid cell.
-    move('fundamentals', 'chart', 'within')
     move('option-chain', 'chart', 'within')
     move('option-ticket', 'order-ticket', 'within')
     move('depth', 'order-ticket', 'within')
     move('time-and-sales', 'market-depth', 'within')
 
-    for (const widgetType of ['watchlist', 'chart', 'order-ticket', 'account', 'market-depth']) {
+    for (const widgetType of [
+      'watchlist',
+      'fundamentals',
+      'chart',
+      'order-ticket',
+      'account',
+      'market-depth',
+    ]) {
       const target = panel(widgetType)
       if (target) layout.activatePanel(target.panelId)
     }

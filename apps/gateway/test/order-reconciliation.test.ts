@@ -143,6 +143,59 @@ it('restores completed-order callbacks into History during session reconciliatio
   })
 })
 
+it('restores a completed order read back after a restart with its fill size and completion time', () => {
+  const { ib, store } = fixture()
+  vi.setSystemTime(new Date('2026-10-05T14:00:44Z'))
+  // As IBKR reports it: no API order id, totalQuantity 0, and the size in filledQuantity.
+  ib.emit(
+    EventName.completedOrder,
+    { symbol: 'MSFT', secType: 'STK', exchange: 'SMART', currency: 'USD' },
+    {
+      orderId: 0,
+      permId: 634477160,
+      account: 'DU123',
+      action: 'SELL',
+      orderType: 'MKT',
+      totalQuantity: 0,
+      filledQuantity: 1,
+    },
+    {
+      status: 'Filled',
+      completedStatus: 'Filled Size: 1',
+      completedTime: '20261005 09:30:16 US/Eastern',
+    },
+  )
+  // The gateway then replays the day's executions, which supply the fill price.
+  vi.setSystemTime(new Date('2026-10-05T14:00:45Z'))
+  ib.emit(
+    EventName.execDetails,
+    0,
+    { symbol: 'MSFT', secType: 'STK', exchange: 'SMART', currency: 'USD' },
+    {
+      orderId: 0,
+      permId: 634477160,
+      execId: '0000dc8f.6bceba94.01.01',
+      acctNumber: 'DU123',
+      side: 'SLD',
+      shares: 1,
+      price: 523.39,
+      cumQty: 1,
+      avgPrice: 523.39,
+      time: '20261005 09:30:16 US/Eastern',
+    },
+  )
+
+  const restored = store.getState().ordersHistory?.[0]
+  expect(restored).toMatchObject({
+    status: 'filled',
+    quantity: 1,
+    filledQuantity: 1,
+    avgFillPrice: 523.39,
+    updatedAt: '2026-10-05T13:30:16.000Z',
+  })
+  expect(restored?.submittedAt).toBeUndefined()
+})
+
 it('reconciles a complete execution when IBKR omits the final order-status callback', () => {
   const { ib, store } = fixture()
   store.upsertOrder(baseOrder)

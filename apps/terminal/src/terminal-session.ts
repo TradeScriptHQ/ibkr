@@ -25,6 +25,14 @@ export function subscribeBrowserSessionChanges(listener: () => void): () => void
   }
 }
 
+/**
+ * The CSRF token of the session the browser cookie currently holds. Requests made long after a
+ * client was built (claim releases during teardown) read it here, since a refresh rotates it.
+ */
+export function currentCsrfToken(): string | undefined {
+  return settledSession?.csrfToken
+}
+
 export function bootstrapBrowserSession(refresh = false): Promise<SessionBootstrapResponse> {
   if (
     !sessionBootstrapPending &&

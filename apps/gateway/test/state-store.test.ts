@@ -107,3 +107,33 @@ describe('execution replay timestamps', () => {
     },
   )
 })
+
+describe('broker state market depth', () => {
+  it('keeps depth reads current but publishes one settled book per event-loop turn', async () => {
+    const store = new BrokerStateStore()
+    const events: Array<{ type: string; marketDepth?: { bids: Array<{ price: number }> } }> = []
+    store.subscribe((event) => events.push(event as (typeof events)[number]))
+    events.length = 0
+    const symbol = { symbol: 'AAPL', exchange: 'SMART', currency: 'USD', assetClass: 'stock' }
+    const book = (bids: number[]) => ({
+      streamId: 'depth:AAPL',
+      symbol,
+      bids: bids.map((price) => ({ price, size: 100 })),
+      asks: [{ price: 251, size: 100 }],
+      updatedAt: new Date().toISOString(),
+    })
+
+    // A top-of-book change arrives as delete then insert at the same position.
+    store.setMarketDepth(book([250, 249.9]))
+    store.setMarketDepth(book([249.9]))
+    store.setMarketDepth(book([250.05, 249.9]))
+    expect(store.marketDepth('depth:AAPL')?.bids.map((level) => level.price)).toEqual([
+      250.05, 249.9,
+    ])
+    expect(events).toEqual([])
+
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(events.map((event) => event.type)).toEqual(['market-depth'])
+    expect(events[0]?.marketDepth?.bids.map((level) => level.price)).toEqual([250.05, 249.9])
+  })
+})

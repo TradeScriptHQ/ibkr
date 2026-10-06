@@ -45,6 +45,7 @@ it('keeps account figures in the portfolio and hosts market status only in the a
     expect(widgets.statusBarOptions?.session).toBe(false)
     expect(widgets.chartOptions?.features?.sessionBadge).toBe(false)
     expect(widgets.accountPanelOptions?.showAccountTitle).toBe(false)
+    expect(widgets.accountPanelOptions?.density).toBe('compact')
   }
   expect(licensedWorkstationSessionMeta(undefined)?.variant).toBe('full')
 })

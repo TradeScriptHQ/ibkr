@@ -63,6 +63,31 @@ describe('account currency conversion through native service callbacks', () => {
     })
   })
 
+  it('asks IBKR about a missing pair direction once instead of on every valuation', async () => {
+    const { service, store, ib, complete } = fixture()
+    store.setAccounts([{ id: 'DU-TEST', label: 'Synthetic', currency: 'EUR' }], 'DU-TEST')
+    ib.reqContractDetails.mockImplementation((requestId: number, contract: Contract) => {
+      if (contract.symbol === 'USD')
+        ib.emit(EventName.error, new Error('No security definition has been found'), 200, requestId)
+      else complete(requestId, contract)
+    })
+    for (let valuation = 0; valuation < 3; valuation += 1) {
+      const pending = service.getAccountCurrencyConversion('DU-TEST', 'USD')
+      await vi.advanceTimersByTimeAsync(100)
+      expect(await pending).toMatchObject({ fromCurrency: 'USD', toCurrency: 'EUR' })
+    }
+    expect(ib.reqContractDetails.mock.calls.map(([, contract]) => contract.symbol)).toEqual([
+      'USD',
+      'EUR',
+    ])
+    service.beginOrderReconciliation()
+    service.finishOrderReconciliation()
+    const pending = service.getAccountCurrencyConversion('DU-TEST', 'USD')
+    await vi.advanceTimersByTimeAsync(100)
+    await pending
+    expect(ib.reqContractDetails).toHaveBeenCalledTimes(4)
+  })
+
   it('refuses an unapproved account before any native request', async () => {
     const { service, ib } = fixture()
     await expect(service.getAccountCurrencyConversion('DU-OTHER', 'EUR')).rejects.toMatchObject({

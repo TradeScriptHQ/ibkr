@@ -19,11 +19,13 @@ export function createDepthRowExtension() {
       const content = initial.defaultContent.mount(row)
       notices.add(notice)
       const update = (context: MarketDepthLevelExtensionContext) => {
-        notice.hidden =
+        const hidden =
           context.index !== 0 ||
           (context.bid?.tier !== 'Top of book' && context.ask?.tier !== 'Top of book')
-        notice.textContent = message
-        notice.title = diagnostic
+        // Depth updates arrive many times a second; write only what changed.
+        if (notice.hidden !== hidden) notice.hidden = hidden
+        if (notice.textContent !== message) notice.textContent = message
+        if (notice.title !== diagnostic) notice.title = diagnostic
       }
       update(initial)
       return {

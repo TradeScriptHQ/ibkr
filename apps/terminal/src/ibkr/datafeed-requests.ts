@@ -1,3 +1,4 @@
+import { type MarketDataErrorCode, MarketDataErrorCodeSchema } from '@ibkr-terminal/contracts'
 import type {
   BarHistoryRequest,
   BarHistoryResult,
@@ -42,10 +43,12 @@ export function diagnosticMessage(error: unknown): string {
 export async function getTimeAndSales(
   baseUrl: string,
   request: TimeAndSalesRequest,
+  claim?: { clientId: string; claimId: string },
 ): Promise<TimeAndSalesEntry[]> {
   const params = new URLSearchParams({
     symbol: request.symbol.brokerSymbol ?? request.symbol.ticker,
     limit: String(request.limit ?? 200),
+    ...(claim ? { client: claim.clientId, claim: claim.claimId } : {}),
   })
   if (request.symbol.exchange) params.set('exchange', request.symbol.exchange)
   if (request.symbol.listedExchange) {
@@ -53,6 +56,11 @@ export async function getTimeAndSales(
   }
   if (request.symbol.currency) params.set('currency', request.symbol.currency)
   if (request.symbol.type) params.set('assetClass', request.symbol.type)
+  if (request.startTime !== undefined) params.set('startTime', String(request.startTime))
+  if (request.endTime !== undefined) params.set('endTime', String(request.endTime))
+  if (request.beforeSequence !== undefined) {
+    params.set('beforeSequence', String(request.beforeSequence))
+  }
   return get<TimeAndSalesEntry[]>(baseUrl, `/time-and-sales?${params.toString()}`)
 }
 
@@ -386,15 +394,43 @@ export async function loadBars(
   })
 }
 
+/**
+ * Chart copy for market-data failures the gateway classifies. A rejection shows IBKR's own reason
+ * from the gateway message; the other causes have a fixed recovery step.
+ */
+const MARKET_DATA_ERROR_COPY: Record<MarketDataErrorCode, { title: string; message?: string }> = {
+  'market-data-competing-session': {
+    title: 'IBKR is withholding market data',
+    message:
+      'IBKR reports a competing live session. Restart TWS or IB Gateway and log in again; if this persists, sign out of IBKR on other devices.',
+  },
+  'market-data-timeout': {
+    title: 'No response from IBKR',
+    message:
+      'IBKR accepted the request but sent no chart history. If this keeps happening, restart TWS or IB Gateway.',
+  },
+  'market-data-rejected': { title: 'IBKR rejected the request' },
+}
+
 /** Adapt the shared HTTP error to the SDK's datafeed error contract. */
 export async function get<T>(baseUrl: string, path: string): Promise<T> {
   try {
     return await gatewayRequest<T>(baseUrl, path)
   } catch (error) {
     if (!(error instanceof GatewayRequestError)) throw error
-    throw new SdkError('datafeed.request-failed', `${error.message} (${error.status})`, {
-      status: error.status,
-      path: error.path,
-    })
+    const cause = MarketDataErrorCodeSchema.safeParse(error.code)
+    throw new SdkError(
+      'datafeed.request-failed',
+      `${error.message} (${error.status})`,
+      { status: error.status, path: error.path, ...(error.code ? { code: error.code } : {}) },
+      cause.success
+        ? {
+            presentation: {
+              title: MARKET_DATA_ERROR_COPY[cause.data].title,
+              message: MARKET_DATA_ERROR_COPY[cause.data].message ?? error.message,
+            },
+          }
+        : undefined,
+    )
   }
 }

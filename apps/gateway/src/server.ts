@@ -2,6 +2,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto'
 import cookie from '@fastify/cookie'
 import websocket from '@fastify/websocket'
 import type {
+  MarketDataErrorCode,
   SystemStatusResponse,
   TradeScriptAuthorizationErrorCode,
   TradeScriptAuthorizationFailure,
@@ -19,7 +20,7 @@ import type { RawData } from 'ws'
 import type { GatewayConfig } from './config.js'
 import type { EventStream } from './events/event-stream.js'
 import type { IbkrService } from './ibkr/ibkr-service.js'
-import { RequestError } from './ibkr/request-error.js'
+import { MarketDataError, RequestError } from './ibkr/request-error.js'
 import { registerIbkrRoutes } from './ibkr/routes.js'
 import type { BrokerStateStore } from './ibkr/state-store.js'
 import type { LocalDatabase } from './persistence/database.js'
@@ -99,6 +100,7 @@ function sendError(
     | 'not-ready'
     | 'not-found'
     | 'internal-error'
+    | MarketDataErrorCode
     | TradeScriptAuthorizationErrorCode,
   message: string,
   authorizationFailure?: TradeScriptAuthorizationFailure,
@@ -538,6 +540,7 @@ export async function createGatewayServer(options: GatewayServerOptions) {
         return options.brokerStore!
       },
       authenticated: { preHandler: requireSession },
+      sessionMutation: { preHandler: [requireSession, requireMutation] },
       brokerInspection: { preHandler: [requireSession, requireMutation, requireConnectionReady] },
       financialMutation: { preHandler: [requireSession, requireMutation, requireTradingReady] },
       brokerMutation,
@@ -740,11 +743,13 @@ export async function createGatewayServer(options: GatewayServerOptions) {
       request,
       reply,
       statusCode,
-      error instanceof RequestError && error.authorizationFailure?.code
-        ? error.authorizationFailure.code
-        : statusCode < 500
-          ? 'bad-request'
-          : 'internal-error',
+      error instanceof MarketDataError
+        ? error.code
+        : error instanceof RequestError && error.authorizationFailure?.code
+          ? error.authorizationFailure.code
+          : statusCode < 500
+            ? 'bad-request'
+            : 'internal-error',
       publicMessage,
       error instanceof RequestError ? error.authorizationFailure : undefined,
     )

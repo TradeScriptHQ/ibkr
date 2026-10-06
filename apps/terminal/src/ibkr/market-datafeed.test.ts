@@ -202,6 +202,7 @@ it('expires top-of-book fallback rows and lets genuine depth replace them', asyn
       const url = String(input)
       if (url.includes('/depth?')) {
         return Response.json({
+          streamId: 'depth:SPY',
           symbol: { symbol: 'SPY', exchange: 'SMART', currency: 'USD', assetClass: 'stock' },
           bids: [],
           asks: [],
@@ -242,6 +243,7 @@ it('expires top-of-book fallback rows and lets genuine depth replace them', asyn
         data: JSON.stringify({
           type: 'market-depth',
           marketDepth: {
+            streamId: 'depth:SPY',
             symbol: { symbol: 'SPY', exchange: 'SMART', currency: 'USD', assetClass: 'stock' },
             bids: [{ price: 762.93, size: 280, marketMaker: 'NASDAQ' }],
             asks: [{ price: 762.97, size: 400, marketMaker: 'ARCA' }],
@@ -937,4 +939,35 @@ it('keeps same-ticker listings in separate SDK instrument identities', async () 
   const dollar = await feed.resolveSymbol?.({ ticker: 'SAP', type: 'stock', currency: 'USD' })
   expect(euro?.canonicalSymbol).toBe('IBKR:100')
   expect(dollar?.canonicalSymbol).toBe('IBKR:200')
+})
+
+it('declares footprint and liquidity-heatmap support backed by the classified tape and depth', async () => {
+  const ready = await createIbkrMarketDatafeed().onReady?.()
+  expect(ready).toMatchObject({
+    supportsDepth: true,
+    supportsTimeAndSales: true,
+    supportsFootprint: true,
+    supportsLiquidityHeatmap: true,
+  })
+})
+
+it('pages footprint history through the tape with its time window and sequence cursor', async () => {
+  const fetchMock = vi.fn(async (_input: RequestInfo | URL) =>
+    Response.json([{ time: 1_790_000_001_000, price: 101, size: 2, aggressor: 'buy', sequence: 7 }]),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const feed = createIbkrMarketDatafeed({ baseUrl: 'http://localhost/api' })
+  const prints = await feed.getTimeAndSales?.({
+    symbol: { ticker: 'AAPL', exchange: 'SMART', type: 'stock', currency: 'USD' },
+    startTime: 1_790_000_000_000,
+    endTime: 1_790_000_060_000,
+    beforeSequence: 9,
+    limit: 100_000,
+  })
+  const url = new URL(String(fetchMock.mock.calls[0]?.[0]))
+  expect(url.searchParams.get('startTime')).toBe('1790000000000')
+  expect(url.searchParams.get('endTime')).toBe('1790000060000')
+  expect(url.searchParams.get('beforeSequence')).toBe('9')
+  expect(url.searchParams.get('limit')).toBe('100000')
+  expect(prints).toEqual([expect.objectContaining({ aggressor: 'buy', sequence: 7 })])
 })

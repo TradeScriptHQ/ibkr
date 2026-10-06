@@ -3,6 +3,8 @@ export class GatewayRequestError extends Error {
     readonly status: number,
     readonly path: string,
     message: string,
+    /** The gateway's machine-readable error code, when it sent one. */
+    readonly code?: string,
   ) {
     super(message)
     this.name = 'GatewayRequestError'
@@ -33,13 +35,17 @@ export async function gatewayRequest<T = unknown>(
   })
   if (!response.ok) {
     const payload = (await response.json().catch(() => undefined)) as
-      | { error?: string | { message?: string | undefined } | undefined }
+      | {
+          error?: string | { message?: string | undefined; code?: string | undefined } | undefined
+        }
       | undefined
-    const message = typeof payload?.error === 'string' ? payload.error : payload?.error?.message
+    const error = payload?.error
+    const message = typeof error === 'string' ? error : error?.message
     throw new GatewayRequestError(
       response.status,
       path,
       message ?? `IBKR bridge request failed: ${response.status}`,
+      typeof error === 'object' && typeof error.code === 'string' ? error.code : undefined,
     )
   }
   return response.json() as Promise<T>

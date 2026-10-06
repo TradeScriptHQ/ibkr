@@ -147,6 +147,32 @@ describe('broker connection presentation', () => {
     ).toMatchObject({ label: 'Market data offline', detail: 'Market-data farm disconnected.' })
   })
 
+  it('names a competing live session ahead of market-data farm status', () => {
+    const ready: RequirementStatus = {
+      ...conflict,
+      state: 'ready',
+      connection: { connectionType: 'ib-gateway', clientId: 35299 },
+    }
+    const connected: HealthResponse = {
+      ...health,
+      connectionStatus: 'connected',
+      marketDataConnection: { status: 'connected', message: 'Market data farm connection is OK' },
+    }
+    expect(
+      connectionHealthLabel({ ...connected, competingLiveSession: true }, ready),
+    ).toMatchObject({
+      tone: 'warning',
+      label: 'Market data blocked',
+      detail: expect.stringContaining('Restart IB Gateway and log in again'),
+    })
+    expect(
+      connectionHealthLabel({ ...connected, competingLiveSession: false }, ready),
+    ).toMatchObject({
+      tone: 'connected',
+      label: 'IB Gateway connected',
+    })
+  })
+
   it('does not turn arbitrary messages or request error codes into a broker diagnosis', () => {
     const unknown: RequirementStatus = {
       ...conflict,

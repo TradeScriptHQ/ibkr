@@ -274,7 +274,8 @@ export type StrategyOrderLegDraft =
 export interface Order extends OrderDraft {
   id: string
   status: OrderStatus
-  submittedAt: string
+  /** Absent for orders read back from IBKR's completed orders, which carry no submission time. */
+  submittedAt?: string | undefined
   updatedAt: string
   filledQuantity?: number | undefined
   remainingQuantity?: number | undefined
@@ -361,6 +362,8 @@ export interface MarketDepthLevel {
 }
 
 export interface MarketDepth {
+  /** Gateway stream that owns this book: one per exact contract and row count. */
+  streamId: string
   symbol: BrokerSymbol
   bids: MarketDepthLevel[]
   asks: MarketDepthLevel[]
@@ -418,7 +421,8 @@ export interface BrokerState {
   quotes: MarketQuote[]
   messages: BridgeMessage[]
   diagnostics: BridgeDiagnostic[]
-  marketDepth?: MarketDepth | undefined
+  /** One book per active depth stream; several windows can watch different symbols. */
+  marketDepths?: MarketDepth[] | undefined
   updatedAt: string
 }
 
@@ -516,6 +520,8 @@ export interface HealthResponse {
   rejectMarketOrders?: boolean | undefined
   connectionStatus: ConnectionStatus
   marketDataConnection?: MarketDataConnection | undefined
+  /** An active quote stream reports IBKR 10197: another session is using live market data. */
+  competingLiveSession?: boolean | undefined
   activeAccountId?: string | undefined
 }
 

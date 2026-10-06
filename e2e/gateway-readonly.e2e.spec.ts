@@ -336,9 +336,12 @@ test.describe('real TWS paper state and market-data surface', () => {
   })
 
   test('reports depth and tape truthfully without synthetic rows', async ({ request }) => {
+    const session = await openTerminalSession(request)
+    // Claim the book like a window does, so the test frees its IBKR depth slot when done.
+    const claim = `client=${crypto.randomUUID()}&claim=${crypto.randomUUID()}`
     const [depthResponse, tapeResponse] = await Promise.all([
       request.get(
-        '/api/v1/ibkr/depth?symbol=AAPL&exchange=SMART&currency=USD&assetClass=stock&levels=20',
+        `/api/v1/ibkr/depth?symbol=AAPL&exchange=SMART&currency=USD&assetClass=stock&levels=20&${claim}`,
         {
           headers: browserHeaders,
         },
@@ -365,7 +368,7 @@ test.describe('real TWS paper state and market-data surface', () => {
           if (observedDepth()) return true
           depth = await expectJsonOk<MarketDepth>(
             await request.get(
-              '/api/v1/ibkr/depth?symbol=AAPL&exchange=SMART&currency=USD&assetClass=stock&levels=20',
+              `/api/v1/ibkr/depth?symbol=AAPL&exchange=SMART&currency=USD&assetClass=stock&levels=20&${claim}`,
               { headers: browserHeaders },
             ),
           )
@@ -417,6 +420,142 @@ test.describe('real TWS paper state and market-data surface', () => {
       expect(print.price).toBeGreaterThan(0)
       expect(print.size).toBeGreaterThan(0)
     }
+    const params = new URLSearchParams(claim)
+    await expectJsonOk(
+      await request.post('/api/v1/ibkr/streams/release', {
+        headers: session.mutationHeaders,
+        data: { clientId: params.get('client'), claimIds: [params.get('claim')] },
+      }),
+    )
+  })
+
+  test('reports crypto prints with their real time and without a placeholder size', async ({
+    request,
+  }) => {
+    const path =
+      '/api/v1/ibkr/time-and-sales?symbol=BTC&exchange=PAXOS&currency=USD&assetClass=crypto&limit=50'
+    let prints: { time: number; price: number; size?: number }[] = []
+    let unavailable = ''
+    await expect
+      .poll(
+        async () => {
+          const response = await request.get(path, { headers: browserHeaders })
+          if (response.status() === 503) {
+            unavailable = ((await response.json()) as { error: { message: string } }).error.message
+            return 0
+          }
+          prints = await expectJsonOk(response)
+          return prints.length
+        },
+        { timeout: 30_000 },
+      )
+      .toBeGreaterThan(0)
+      .catch((error: unknown) => {
+        if (!unavailable) throw error
+      })
+    if (prints.length === 0) {
+      expect(unavailable, 'Missing crypto tape must retain the broker reason').toMatch(/tick/iu)
+      test.info().annotations.push({ type: 'tape-unavailable', description: unavailable })
+      return
+    }
+    for (const print of prints) {
+      expect(print.price).toBeGreaterThan(0)
+      // IBKR sends 1 for every crypto print; the real fractional sizes are not on this feed.
+      expect(print).not.toHaveProperty('size')
+      expect(Math.abs(Date.now() - print.time)).toBeLessThan(15 * 60_000)
+    }
+  })
+
+  test('keeps an independent order book for each window watching a different symbol', async ({
+    request,
+  }) => {
+    const session = await openTerminalSession(request)
+    // Two terminal windows, each a stream client holding one order-book claim.
+    const windows = [
+      {
+        client: crypto.randomUUID(),
+        claim: crypto.randomUUID(),
+        query: 'symbol=ETH&exchange=PAXOS&currency=USD&assetClass=crypto',
+      },
+      {
+        client: crypto.randomUUID(),
+        claim: crypto.randomUUID(),
+        query: 'symbol=MSFT&exchange=SMART&primaryExchange=NASDAQ&currency=USD&assetClass=stock',
+      },
+    ]
+    const read = async (window: (typeof windows)[number]) =>
+      expectJsonOk<MarketDepth>(
+        await request.get(
+          `/api/v1/ibkr/depth?${window.query}&levels=10&client=${window.client}&claim=${window.claim}`,
+          { headers: browserHeaders },
+        ),
+      )
+    const pending = (depth: MarketDepth) =>
+      depth.diagnostic?.message.startsWith('Gateway depth pending:') === true
+    const hasRows = (depth: MarketDepth) => depth.bids.length > 0 || depth.asks.length > 0
+    const settled = (depth: MarketDepth) => hasRows(depth) || (depth.diagnostic && !pending(depth))
+    let books = await Promise.all(windows.map(read))
+    const streamIds = books.map((book) => book.streamId)
+    expect(new Set(streamIds).size).toBe(2)
+    const limited = (depth: MarketDepth) => depth.diagnostic?.code === 309
+    // PAXOS crypto trades around the clock, so its window must show real levels.
+    await expect
+      .poll(
+        async () => {
+          books = await Promise.all(windows.map(read))
+          return (hasRows(books[0]!) || limited(books[0]!)) && settled(books[1]!)
+        },
+        { timeout: 25_000 },
+      )
+      .toBe(true)
+    expect(books.map((book) => book.symbol.symbol)).toEqual(['ETH', 'MSFT'])
+    const release = async (window: (typeof windows)[number]) =>
+      expectJsonOk(
+        await request.post('/api/v1/ibkr/streams/release', {
+          headers: session.mutationHeaders,
+          data: { clientId: window.client, claimIds: [window.claim] },
+        }),
+      )
+    const refused = books.find(limited)
+    if (refused) {
+      // Other open windows already use the account's depth limit. The refused book waits with
+      // IBKR's reason; no live book (another window's or this test's) is taken to make room.
+      const live = (await readBrokerState(request)).marketDepths?.filter((book) => !limited(book))
+      expect(live?.length, refused.diagnostic?.message).toBeGreaterThan(0)
+      expect(live?.every((book) => hasRows(book) || !pending(book))).toBe(true)
+      test.info().annotations.push({
+        type: 'depth-limit',
+        description: `${refused.symbol.symbol}: ${refused.diagnostic?.message}`,
+      })
+      await Promise.all(windows.map(release))
+      return
+    }
+    for (const book of books) {
+      if (book.bids.length === 0 && book.asks.length === 0)
+        test.info().annotations.push({
+          type: 'depth-unavailable',
+          description: `${book.symbol.symbol}: ${book.diagnostic?.message}`,
+        })
+    }
+
+    // Reading one window's book never resets or replaces the other's.
+    for (let round = 0; round < 3; round += 1) {
+      const next = await Promise.all(windows.map(read))
+      expect(next.map((book) => book.streamId)).toEqual(streamIds)
+      expect(next.some(pending)).toBe(false)
+    }
+    expect((await readBrokerState(request)).marketDepths?.map((book) => book.streamId)).toEqual(
+      expect.arrayContaining(streamIds),
+    )
+
+    // Window A closes its order book; window B keeps its live book.
+    await release(windows[0]!)
+    await new Promise((resolve) => setTimeout(resolve, 6_000))
+    const remaining = (await readBrokerState(request)).marketDepths?.find(
+      (book) => book.streamId === streamIds[1],
+    )
+    expect(remaining && !pending(remaining)).toBe(true)
+    await release(windows[1]!)
   })
 
   test('provides event snapshots and a single-use authenticated WebSocket ticket', async ({

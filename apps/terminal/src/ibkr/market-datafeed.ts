@@ -30,6 +30,7 @@ import type {
   Unsubscribe,
 } from '@tradescript/pro/sdk'
 import { SdkError } from '@tradescript/pro/sdk'
+import { gatewayRequest } from './broker-request.js'
 import {
   backendQuoteMatches,
   intervalToMs,
@@ -66,6 +67,8 @@ import type { BackendOptionChainResult } from './types.js'
 export interface IbkrMarketDatafeedOptions {
   baseUrl?: string | undefined
   pollMs?: number | undefined
+  /** Lets the feed release its depth and tape claims as widgets unsubscribe. */
+  getCsrfToken?: (() => string | undefined) | undefined
 }
 
 const SUPPORTED_INTERVALS: ChartInterval[] = [
@@ -92,20 +95,40 @@ const SUPPORTED_INTERVALS: ChartInterval[] = [
 export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}): MarketDataFeed {
   const baseUrl = (options.baseUrl ?? 'http://localhost:8765').replace(/\/+$/, '')
   const pollMs = options.pollMs ?? 10000
+  // One stream client per feed (window). Its depth and tape claims stay alive while its event
+  // stream is open, so windows watching different symbols keep their own gateway streams.
+  const streamClientId = crypto.randomUUID()
+  const releaseClaim = (claimId: string) => {
+    const csrfToken = options.getCsrfToken?.()
+    if (!csrfToken) return
+    void gatewayRequest(
+      baseUrl,
+      '/streams/release',
+      { method: 'POST', body: { clientId: streamClientId, claimIds: [claimId] } },
+      csrfToken,
+    ).catch((error: unknown) => {
+      console.warn(`IBKR stream release failed: ${diagnosticMessage(error)}`)
+    })
+  }
   // Widgets share the feed's stream so long-lived HTTP connections cannot starve asset requests.
   let eventSource: EventSource | undefined
-  let latestDepth: BackendMarketDepth | undefined
+  const latestDepths = new Map<string, BackendMarketDepth>()
   let eventSubscriberCount = 0
   const subscribeEvents = (
     eventNames: string[],
     listener: (event: MessageEvent<string>) => void,
   ): Unsubscribe => {
     if (!eventSource) {
-      eventSource = new EventSource(`${baseUrl}/events`)
+      eventSource = new EventSource(`${baseUrl}/events?client=${streamClientId}`)
       const rememberDepth = (event: MessageEvent<string>) => {
         const payload = JSON.parse(event.data) as BackendEvent
-        if (payload.type === 'state') latestDepth = payload.state.marketDepth
-        if (payload.type === 'market-depth') latestDepth = payload.marketDepth
+        if (payload.type === 'state') {
+          latestDepths.clear()
+          for (const depth of payload.state.marketDepths ?? [])
+            latestDepths.set(depth.streamId, depth)
+        }
+        if (payload.type === 'market-depth')
+          latestDepths.set(payload.marketDepth.streamId, payload.marketDepth)
       }
       eventSource.addEventListener('state', rememberDepth)
       eventSource.addEventListener('market-depth', rememberDepth)
@@ -122,7 +145,7 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
       if (eventSubscriberCount === 0) {
         source.close()
         eventSource = undefined
-        latestDepth = undefined
+        latestDepths.clear()
       }
     }
   }
@@ -229,6 +252,9 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
         supportsQuotes: true,
         supportsDepth: true,
         supportsTimeAndSales: true,
+        // The gateway classifies each print's aggressor and streams full depth books.
+        supportsFootprint: true,
+        supportsLiquidityHeatmap: true,
         supportsSessionInfo: true,
         supportsSessionCalendar: true,
         supportsOptionContracts: true,
@@ -426,6 +452,8 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
 
     subscribeDepth(subscription: DepthSubscription, callback: DepthCallback): Unsubscribe {
       let closed = false
+      const claimId = crypto.randomUUID()
+      let streamId: string | undefined
       let currentDepth: BackendMarketDepth | undefined
       let currentQuote: BackendQuote | undefined
       let expiryTimer: ReturnType<typeof setTimeout> | undefined
@@ -502,24 +530,24 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
           void refresh()
         }
         if (!connected) return
+        // The gateway streams one book per claimed contract; follow only this claim's book.
         const depth =
-          payload.type === 'market-depth'
-            ? payload.marketDepth
-            : payload.type === 'state'
-              ? payload.state.marketDepth
-              : undefined
+          streamId === undefined
+            ? undefined
+            : payload.type === 'market-depth'
+              ? payload.marketDepth.streamId === streamId
+                ? payload.marketDepth
+                : undefined
+              : payload.type === 'state'
+                ? payload.state.marketDepths?.find((candidate) => candidate.streamId === streamId)
+                : undefined
         const quotes =
           payload.type === 'quotes'
             ? payload.quotes
             : payload.type === 'state'
               ? payload.state.quotes
               : undefined
-        if (
-          depth &&
-          depth.symbol.symbol === (subscription.symbol.brokerSymbol ?? subscription.symbol.ticker)
-        ) {
-          currentDepth = depth
-        }
+        if (depth) currentDepth = depth
         const quote = quotes?.find((candidate) =>
           backendQuoteMatches(candidate, subscription.symbol),
         )
@@ -544,12 +572,15 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
                   : {}),
                 ...(subscription.symbol.currency ? { currency: subscription.symbol.currency } : {}),
                 ...(subscription.symbol.type ? { assetClass: subscription.symbol.type } : {}),
+                client: streamClientId,
+                claim: claimId,
               }).toString()}`,
             ),
             getBackendQuotes(baseUrl, [subscription.symbol]).catch(() => []),
           ])
           if (closed || requestGeneration !== generation) return
           if (!depth) throw new Error('IBKR did not return a market-depth snapshot.')
+          streamId = depth.streamId
           currentDepth = depth
           currentQuote = quotes.find((quote) => backendQuoteMatches(quote, subscription.symbol))
           retryDelay = 500
@@ -574,6 +605,7 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
         if (expiryTimer) clearTimeout(expiryTimer)
         if (retryTimer) clearTimeout(retryTimer)
         unsubscribe()
+        releaseClaim(claimId)
       }
     },
 
@@ -589,9 +621,12 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
       let lastSequence = 0
       let first = true
       let timer: number | undefined
+      const claim = { clientId: streamClientId, claimId: crypto.randomUUID() }
+      // Holding the event stream keeps this window's tape claim alive between polls.
+      const unsubscribeEvents = subscribeEvents(['open'], () => undefined)
       const poll = async () => {
         try {
-          const prints = await getTimeAndSales(baseUrl, subscription)
+          const prints = await getTimeAndSales(baseUrl, subscription, claim)
           const newestSequence = Math.max(0, ...prints.map((print) => print.sequence ?? 0))
           const reset = !first && newestSequence > 0 && newestSequence < lastSequence
           const snapshot = first || reset
@@ -618,6 +653,8 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
       return () => {
         disposed = true
         if (timer !== undefined) window.clearTimeout(timer)
+        unsubscribeEvents()
+        releaseClaim(claim.claimId)
       }
     },
 
@@ -629,7 +666,13 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
         if (closed) return
         if (expiryTimer) clearTimeout(expiryTimer)
         const now = Date.now()
-        const quotes = rawQuotes.map((quote) => withDepthQuote(quote, latestDepth, now))
+        const quotes = rawQuotes.map((quote) => {
+          for (const depth of latestDepths.values()) {
+            const fromBook = withDepthQuote(quote, depth, now)
+            if (fromBook !== quote) return fromBook
+          }
+          return quote
+        })
         callback(quotes)
         const expiries = quotes
           .filter((quote) => quote.bidAskSource?.expiresAt !== undefined)

@@ -2,7 +2,7 @@ import type { ConnectionSnapshot, SystemStatusResponse } from '@ibkr-terminal/co
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { loadGatewayConfig } from '../src/config.js'
 import { EventStream } from '../src/events/event-stream.js'
-import { RequestError } from '../src/ibkr/request-error.js'
+import { MarketDataError, RequestError } from '../src/ibkr/request-error.js'
 import { SessionStore } from '../src/security/session-store.js'
 import { WebSocketTicketStore } from '../src/security/websocket-tickets.js'
 import { createGatewayServer } from '../src/server.js'
@@ -236,6 +236,39 @@ it('saves agent limits and toggles agent authority without reconnecting, publish
   expect(original.start).not.toHaveBeenCalled()
   expect(original.stop).not.toHaveBeenCalled()
   expect(published).toHaveBeenCalledTimes(3)
+})
+
+it('reports typed market-data causes for chart history and a competing live session in health', async () => {
+  const { BrokerStateStore } = await import('../src/ibkr/state-store.js')
+  const brokerStore = new BrokerStateStore()
+  brokerStore.setConnectionStatus('connected')
+  const message =
+    "IBKR sent no chart history for AAPL while it reports that another session is using this account's live market data (IBKR 10197)."
+  const app = await createGatewayServer({
+    config: loadGatewayConfig({ NODE_ENV: 'test' }),
+    ibkr: {
+      loadBars: vi.fn(async () => {
+        throw new MarketDataError(503, 'market-data-competing-session', message)
+      }),
+      competingLiveSessionReported: () => true,
+    } as unknown as import('../src/ibkr/ibkr-service.js').IbkrService,
+    brokerStore,
+    proxyCapability: browserHeaders['x-terminal-proxy-capability'],
+    sessions: new SessionStore(),
+    tickets: new WebSocketTicketStore(),
+    events: new EventStream(),
+    getStatus: status,
+  })
+  apps.push(app)
+  const headers = await authenticatedHeaders(app)
+  const bars = await app.inject({
+    path: '/api/v1/ibkr/bars?symbol=AAPL&interval=5m&barCount=500',
+    headers,
+  })
+  expect(bars.statusCode).toBe(503)
+  expect(bars.json().error).toMatchObject({ code: 'market-data-competing-session', message })
+  const health = await app.inject({ path: '/api/v1/ibkr/health', headers })
+  expect(health.json()).toMatchObject({ connectionStatus: 'connected', competingLiveSession: true })
 })
 
 it('rechecks agent authority inside execution when it changes after the early request check', async () => {
@@ -638,6 +671,7 @@ it('dispatches manual trades to the active broker and rejects stale session gene
           placements += 1
           return { id: 'synthetic-order' }
         },
+        competingLiveSessionReported: () => false,
       } as unknown as import('../src/ibkr/ibkr-service.js').IbkrService,
     }),
     undefined,
@@ -732,4 +766,34 @@ it('dispatches manual trades to the active broker and rejects stale session gene
     ).statusCode,
   ).toBe(201)
   expect(placements).toBe(2)
+})
+
+it('passes numeric tape history bounds to the bridge and ignores malformed ones', async () => {
+  const { BrokerStateStore } = await import('../src/ibkr/state-store.js')
+  const brokerStore = new BrokerStateStore()
+  brokerStore.setConnectionStatus('connected')
+  const getTimeAndSales = vi.fn(() => [])
+  const app = await createGatewayServer({
+    config: loadGatewayConfig({ NODE_ENV: 'test' }),
+    ibkr: { getTimeAndSales } as unknown as import('../src/ibkr/ibkr-service.js').IbkrService,
+    brokerStore,
+    proxyCapability: browserHeaders['x-terminal-proxy-capability'],
+    sessions: new SessionStore(),
+    tickets: new WebSocketTicketStore(),
+    events: new EventStream(),
+    getStatus: status,
+  })
+  apps.push(app)
+  const headers = await authenticatedHeaders(app)
+  const response = await app.inject({
+    path: '/api/v1/ibkr/time-and-sales?symbol=AAPL&limit=500&startTime=1790000000000&endTime=1790000060000&beforeSequence=abc',
+    headers,
+  })
+  expect(response.statusCode).toBe(200)
+  expect(getTimeAndSales).toHaveBeenCalledWith(
+    expect.objectContaining({ symbol: 'AAPL' }),
+    500,
+    undefined,
+    { startTime: 1_790_000_000_000, endTime: 1_790_000_060_000, beforeSequence: undefined },
+  )
 })

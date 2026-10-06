@@ -23,6 +23,7 @@ import {
   toOptionChainContract,
   toResolvedOptionContract,
   uniqueOptionChainContracts,
+  withWireOptionExpiry,
 } from './option-chain.js'
 import { OptionQuoteStreams, type OptionStreamQuote } from './option-quote-streams.js'
 import { authoritativePriceIncrements, selectedMarketRuleId } from './order-price-increments.js'
@@ -457,7 +458,7 @@ export class OptionChains {
             const priceIncrements = await this.priceIncrementsFor(item, params.exchange)
             return [
               {
-                ...item.contract,
+                ...withWireOptionExpiry(item.contract),
                 ...(priceStep === undefined ? {} : { priceStep }),
                 ...(priceIncrements ? { priceIncrements } : {}),
               },
@@ -653,7 +654,7 @@ export class OptionChains {
     const priceIncrements = await this.priceIncrementsFor(match, route)
     return {
       ...query,
-      ...match.contract,
+      ...withWireOptionExpiry(match.contract),
       conId: match.contract.conId,
       exchange: route,
       currency: contract.currency ?? match.contract.currency ?? 'USD',

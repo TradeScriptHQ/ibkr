@@ -80,6 +80,12 @@ export function connectionHealthLabel(health: HealthResponse, session?: Requirem
         session?.message ??
         `The ${broker} connection is unavailable. Displayed prices may be last-known values.`,
     }
+  if (health.competingLiveSession)
+    return {
+      tone: 'warning',
+      label: 'Market data blocked',
+      detail: `IBKR reports a competing live session (10197) and is withholding prices and chart history. Restart ${broker} and log in again; if this persists, sign out of IBKR Mobile, Client Portal and any other IBKR login.`,
+    }
   const data = health.marketDataConnection
   if (data?.status === 'disconnected')
     return { tone: 'error', label: 'Market data offline', detail: data.message }

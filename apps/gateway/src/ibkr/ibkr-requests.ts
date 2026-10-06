@@ -18,7 +18,7 @@ import {
   whatToShowForContract,
 } from './market-data.js'
 import type { IbSecDefOptionParameters } from './option-chain.js'
-import { RequestError } from './request-error.js'
+import { MarketDataError, RequestError } from './request-error.js'
 import {
   normalizeIbDateKey,
   normalizeIbTimezone,
@@ -32,6 +32,7 @@ const CONTRACT_DETAILS_TIMEOUT_MS = 12000
 const OPTION_CHAIN_TIMEOUT_MS = 12000
 const SYMBOL_SEARCH_TIMEOUT_MS = 3000
 const MARKET_RULE_TIMEOUT_MS = 5000
+export const HISTORICAL_BARS_TIMEOUT_MS = 20_000
 const SMALL_BAR_GLOBAL_WINDOW_MS = 10 * 60_000
 const SMALL_BAR_GLOBAL_LIMIT = 60
 const SMALL_BAR_IDENTICAL_WINDOW_MS = 15_000
@@ -263,12 +264,13 @@ export class IbkrRequests {
         this.ib.cancelHistoricalData(reqId)
         cleanup()
         reject(
-          new RequestError(
+          new MarketDataError(
             504,
-            `Timed out loading historical bars for ${contract.symbol ?? 'symbol'} from IBKR`,
+            'market-data-timeout',
+            `IBKR accepted the chart history request for ${contract.symbol ?? 'this symbol'} but sent no data within ${HISTORICAL_BARS_TIMEOUT_MS / 1_000} seconds. If this continues, restart TWS or IB Gateway and log in again.`,
           ),
         )
-      }, 20000)
+      }, HISTORICAL_BARS_TIMEOUT_MS)
       const onHistoricalData = (
         eventReqId: number,
         time: string,
@@ -303,8 +305,14 @@ export class IbkrRequests {
           resolve([])
           return
         }
-        const suffix = code ? ` (${code})` : ''
-        reject(new RequestError(historicalErrorStatus(error, code), `${error.message}${suffix}`))
+        const suffix = code ? ` (IBKR ${code})` : ''
+        reject(
+          new MarketDataError(
+            historicalErrorStatus(error, code),
+            'market-data-rejected',
+            `IBKR rejected the chart history request for ${contract.symbol ?? 'this symbol'}: ${error.message}${suffix}`,
+          ),
+        )
       }
       const cleanup = () => {
         clearTimeout(timeout)

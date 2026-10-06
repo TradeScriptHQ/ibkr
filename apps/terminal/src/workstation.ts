@@ -21,9 +21,14 @@ import { followInstrument, readInstrument } from './instrument-preference.js'
 import { createMcpAgentConsoleController } from './mcp/agent-console.js'
 import { connectTradeScriptMcp } from './mcp/browser-bridge.js'
 import { createLocalSimulation, MOCK_ACCOUNT_ID } from './mock/local-simulation.js'
+import {
+  createOptionChainGreeksStore,
+  createOptionChainGreeksToggle,
+  optionChainColumns,
+} from './option-chain-greeks.js'
 import type { ConnectionRiskAuthority } from './risk.js'
 import { followSdkLease } from './sdk-lease-renewal.js'
-import { createTerminalTradeScriptSdk } from './terminal-session.js'
+import { createTerminalTradeScriptSdk, currentCsrfToken } from './terminal-session.js'
 import { createLocalWatchlistAdapter } from './watchlist.js'
 import { activateWorkstationWidget, arrangeDesktopWorkstation } from './workspace-layout.js'
 import {
@@ -145,7 +150,12 @@ export function createWorkstation({
         })
       : undefined
     const datafeed =
-      simulation?.datafeed ?? createIbkrMarketDatafeed({ baseUrl: '/api/v1/ibkr', pollMs: 2_500 })
+      simulation?.datafeed ??
+      createIbkrMarketDatafeed({
+        baseUrl: '/api/v1/ibkr',
+        pollMs: 2_500,
+        getCsrfToken: currentCsrfToken,
+      })
     const broker =
       simulation?.broker ??
       createIbkrHttpBrokerAdapter({
@@ -301,6 +311,16 @@ export function createWorkstation({
 
     let stopOptionTicketRejections: (() => void) | undefined
     const depthRows = createDepthRowExtension()
+    const greeks = createOptionChainGreeksStore(localStorage)
+    const greeksToggle = createOptionChainGreeksToggle(greeks)
+    const optionChainOptions = () => ({
+      ...widgets.optionChainOptions,
+      columns: optionChainColumns(widgets.optionChainOptions?.columns ?? [], greeks.getSnapshot()),
+      referencePriceExtension: greeksToggle,
+      onContractSelect() {
+        activateWorkstationWidget(layoutController, 'option-ticket')
+      },
+    })
     setLoadState(workstationLoading('workspace'))
     const initialAppearance = appearance.getSnapshot()
     const sessionMetaOptions = licensedWorkstationSessionMeta(sdk.authorization?.snapshot().policy)
@@ -342,12 +362,7 @@ export function createWorkstation({
         },
       },
 
-      optionChainOptions: {
-        ...widgets.optionChainOptions,
-        onContractSelect() {
-          activateWorkstationWidget(layoutController, 'option-ticket')
-        },
-      },
+      optionChainOptions: optionChainOptions(),
 
       depthLadderOptions: {
         priceWindow: 'follow-price',
@@ -462,6 +477,11 @@ export function createWorkstation({
             theme: WORKSTATION_ACCOUNT_THEMES[mode],
           },
         })
+      }),
+    )
+    lifetime.defer(
+      greeks.subscribe(() => {
+        if (!lifetime.disposed) mounted.update({ optionChainOptions: optionChainOptions() })
       }),
     )
     lifetime.defer(() => stopOptionTicketRejections?.())

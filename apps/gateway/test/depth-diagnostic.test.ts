@@ -47,6 +47,11 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+/** The gateway keeps one book per symbol stream; read the one under test. */
+function bookFor(store: BrokerStateStore, ticker = 'AAPL') {
+  return store.getState().marketDepths?.find((depth) => depth.symbol.symbol === ticker)
+}
+
 describe('market depth diagnostics', () => {
   it('reports pending then bounded no-response without refreshing timestamps on reads', () => {
     const { service, ib, store } = fixture()
@@ -59,13 +64,13 @@ describe('market depth diagnostics', () => {
       expect(current?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
     }
     vi.advanceTimersByTime(1_000)
-    expect(store.getState().marketDepth).toMatchObject({
+    expect(bookFor(store)).toMatchObject({
       updatedAt: initial?.updatedAt,
       bids: [],
       asks: [],
       diagnostic: { message: expect.stringMatching(/^Gateway depth no response:/u) },
     })
-    expect(store.getState().marketDepth?.diagnostic?.code).toBeUndefined()
+    expect(bookFor(store)?.diagnostic?.code).toBeUndefined()
     expect(ib.reqMktDepth).toHaveBeenCalledTimes(1)
   })
 
@@ -75,9 +80,9 @@ describe('market depth diagnostics', () => {
     const id = ib.reqMktDepth.mock.lastCall?.[0]
     vi.advanceTimersByTime(15_000)
     ib.emit(EventName.updateMktDepth, id, 0, 0, 1, 250, 10)
-    expect(store.getState().marketDepth?.bids).toEqual([{ price: 250, size: 10 }])
-    expect(store.getState().marketDepth?.diagnostic).toBeUndefined()
-    expect(store.getState().marketDepth?.updatedAt).not.toBe(initial?.updatedAt)
+    expect(bookFor(store)?.bids).toEqual([{ price: 250, size: 10 }])
+    expect(bookFor(store)?.diagnostic).toBeUndefined()
+    expect(bookFor(store)?.updatedAt).not.toBe(initial?.updatedAt)
   })
 
   it('new subscriptions own their deadline and refuse old timers, quotes and callbacks', () => {
@@ -93,17 +98,15 @@ describe('market depth diagnostics', () => {
     ib.emit(EventName.error, new Error('Old depth permission'), 2152, oldId)
     ib.emit(EventName.updateMktDepth, oldId, 0, 0, 1, 999, 1)
     vi.advanceTimersByTime(5_000)
-    expect(store.getState().marketDepth).toMatchObject({
+    expect(bookFor(store, 'MSFT')).toMatchObject({
       symbol: { symbol: 'MSFT' },
       bids: [],
       diagnostic: { message: expect.stringMatching(/^Gateway depth pending:/u) },
     })
     vi.advanceTimersByTime(10_000)
-    expect(store.getState().marketDepth?.diagnostic?.message).toMatch(
-      /^Gateway depth no response:/u,
-    )
+    expect(bookFor(store, 'MSFT')?.diagnostic?.message).toMatch(/^Gateway depth no response:/u)
     ib.emit(EventName.updateMktDepth, currentId, 0, 0, 0, 300, 10)
-    expect(store.getState().marketDepth?.diagnostic).toBeUndefined()
+    expect(bookFor(store, 'MSFT')?.diagnostic).toBeUndefined()
   })
 
   it('a depth-owned native error remains the authority after the pending deadline', () => {
@@ -112,7 +115,7 @@ describe('market depth diagnostics', () => {
     const id = ib.reqMktDepth.mock.lastCall?.[0]
     ib.emit(EventName.error, new Error('Exact depth permission unavailable'), 2152, id)
     vi.advanceTimersByTime(30_000)
-    expect(store.getState().marketDepth?.diagnostic).toEqual({
+    expect(bookFor(store)?.diagnostic).toEqual({
       code: 2152,
       message: 'Exact depth permission unavailable',
     })
@@ -120,27 +123,27 @@ describe('market depth diagnostics', () => {
 
   it('disconnect clears a pending timer and reconciliation starts a fresh bounded request', () => {
     const { service, ib, store } = fixture()
-    service.getMarketDepth(symbol)
+    // A terminal window holds its claim for as long as its event stream stays open.
+    service.connectStreamClient('window-1')
+    service.getMarketDepth(symbol, 20, { clientId: 'window-1', claimId: 'order-book' })
     const oldId = ib.reqMktDepth.mock.lastCall?.[0]
     vi.advanceTimersByTime(5_000)
     ib.emit(EventName.disconnected)
-    const disconnected = store.getState().marketDepth
+    const disconnected = bookFor(store)
     vi.advanceTimersByTime(20_000)
-    expect(store.getState().marketDepth).toEqual(disconnected)
+    expect(bookFor(store)).toEqual(disconnected)
     ib.emit(EventName.connected)
     const currentId = ib.reqMktDepth.mock.lastCall?.[0]
     expect(currentId).not.toBe(oldId)
-    const restored = store.getState().marketDepth
+    const restored = bookFor(store)
     expect(restored?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
     ib.emit(EventName.updateMktDepth, oldId, 0, 0, 1, 999, 1)
-    expect(store.getState().marketDepth?.bids).toEqual([])
+    expect(bookFor(store)?.bids).toEqual([])
     vi.advanceTimersByTime(14_000)
-    expect(store.getState().marketDepth?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
+    expect(bookFor(store)?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
     vi.advanceTimersByTime(1_000)
-    expect(store.getState().marketDepth?.diagnostic?.message).toMatch(
-      /^Gateway depth no response:/u,
-    )
-    expect(store.getState().marketDepth?.updatedAt).toBe(restored?.updatedAt)
+    expect(bookFor(store)?.diagnostic?.message).toMatch(/^Gateway depth no response:/u)
+    expect(bookFor(store)?.updatedAt).toBe(restored?.updatedAt)
   })
 
   it('a native update before the deadline clears pending and a recovered reset reason', () => {
@@ -149,11 +152,11 @@ describe('market depth diagnostics', () => {
     const id = ib.reqMktDepth.mock.lastCall?.[0]
     ib.emit(EventName.updateMktDepth, id, 0, 0, 1, 250, 10)
     vi.advanceTimersByTime(15_000)
-    expect(store.getState().marketDepth?.diagnostic).toBeUndefined()
+    expect(bookFor(store)?.diagnostic).toBeUndefined()
     ib.emit(EventName.error, new Error('Market depth RESET'), 317, id)
-    expect(store.getState().marketDepth?.diagnostic?.code).toBe(317)
+    expect(bookFor(store)?.diagnostic?.code).toBe(317)
     ib.emit(EventName.updateMktDepth, id, 0, 0, 0, 251, 20)
-    expect(store.getState().marketDepth?.diagnostic).toBeUndefined()
+    expect(bookFor(store)?.diagnostic).toBeUndefined()
   })
 
   it('retains and returns a requested tape history larger than 1000 prints', () => {
@@ -201,7 +204,7 @@ describe('market depth diagnostics', () => {
     const newTapeId = ib.reqTickByTickData.mock.calls[1]?.[0]
     expect(service.getQuotes([symbol])[0].bid).toBeUndefined()
     expect(optionStreams.read({ conId: 265598, exchange: 'SMART', currency: 'USD' })).toEqual({})
-    expect(store.getState().marketDepth).toMatchObject({
+    expect(bookFor(store)).toMatchObject({
       bids: [],
       asks: [],
       diagnostic: { code: 1101 },
@@ -214,7 +217,7 @@ describe('market depth diagnostics', () => {
     ib.emit(EventName.tickByTickAllLast, oldTapeId, 1, '1700000001', 999, 1, {}, 'NASDAQ', '')
     expect(service.getQuotes([symbol])[0].bid).toBeUndefined()
     expect(optionStreams.read({ conId: 265598, exchange: 'SMART', currency: 'USD' })).toEqual({})
-    expect(store.getState().marketDepth?.bids).toEqual([])
+    expect(bookFor(store)?.bids).toEqual([])
     expect(service.getTimeAndSales(symbol)).toEqual([])
 
     ib.emit(EventName.tickPrice, newStockId, 1, 251)
@@ -227,7 +230,7 @@ describe('market depth diagnostics', () => {
         bid: 1.3,
       },
     )
-    expect(store.getState().marketDepth?.bids).toEqual([{ price: 251, size: 20 }])
+    expect(bookFor(store)?.bids).toEqual([{ price: 251, size: 20 }])
     expect(service.getTimeAndSales(symbol)).toHaveLength(1)
   })
 
@@ -260,7 +263,7 @@ describe('market depth diagnostics', () => {
         bid: 1.25,
       },
     )
-    expect(store.getState().marketDepth?.bids).toEqual([{ price: 250, size: 10 }])
+    expect(bookFor(store)?.bids).toEqual([{ price: 250, size: 10 }])
     expect(service.getTimeAndSales(symbol)).toHaveLength(1)
   })
 
@@ -274,15 +277,15 @@ describe('market depth diagnostics', () => {
 
     const newId = ib.reqMktDepth.mock.calls[1]?.[0]
     expect(newId).not.toBe(oldId)
-    expect(store.getState().marketDepth).toMatchObject({
+    expect(bookFor(store)).toMatchObject({
       bids: [],
       asks: [],
       diagnostic: { code: 316 },
     })
     ib.emit(EventName.updateMktDepth, oldId, 0, 0, 1, 999, 1)
-    expect(store.getState().marketDepth?.bids).toEqual([])
+    expect(bookFor(store)?.bids).toEqual([])
     ib.emit(EventName.updateMktDepth, newId, 0, 0, 1, 251, 20)
-    expect(store.getState().marketDepth?.bids).toEqual([{ price: 251, size: 20 }])
+    expect(bookFor(store)?.bids).toEqual([{ price: 251, size: 20 }])
   })
 
   it('empties depth after reset code 317 before applying later entries', () => {
@@ -294,13 +297,13 @@ describe('market depth diagnostics', () => {
     ib.emit(EventName.error, new Error('Market depth data has been RESET'), 317, id)
 
     expect(ib.reqMktDepth).toHaveBeenCalledTimes(1)
-    expect(store.getState().marketDepth).toMatchObject({
+    expect(bookFor(store)).toMatchObject({
       bids: [],
       asks: [],
       diagnostic: { code: 317 },
     })
     ib.emit(EventName.updateMktDepth, id, 0, 0, 1, 251, 20)
-    expect(store.getState().marketDepth?.bids).toEqual([{ price: 251, size: 20 }])
+    expect(bookFor(store)?.bids).toEqual([{ price: 251, size: 20 }])
   })
   it('retains the broker reason without disconnecting or refreshing prices, and permits partial data', () => {
     const { service, ib, store } = fixture()
@@ -311,20 +314,75 @@ describe('market depth diagnostics', () => {
       'Exchanges - Top: IBEOS; OVERNIGHT; Need additional market data permissions - Depth: NASDAQ; ARCA;'
     ib.emit(EventName.error, new Error(message), 2152, id)
     expect(store.getState().connectionStatus).toBe('connected')
-    expect(store.getState().marketDepth).toMatchObject({
+    expect(bookFor(store)).toMatchObject({
       bids: [],
       asks: [],
       updatedAt: initial.updatedAt,
       diagnostic: { code: 2152, message },
     })
     ib.emit(EventName.updateMktDepthL2, id, 0, 'IBEOS', 0, 1, 317, 10, true)
-    expect(store.getState().marketDepth).toMatchObject({
+    expect(bookFor(store)).toMatchObject({
       bids: [{ price: 317, size: 10, marketMaker: 'IBEOS' }],
       diagnostic: { code: 2152, message },
     })
     service.getMarketDepth({ ...symbol, symbol: 'MSFT' })
-    expect(store.getState().marketDepth?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
+    expect(bookFor(store, 'MSFT')?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
     ib.emit(EventName.error, new Error(message), 2152, id)
-    expect(store.getState().marketDepth?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
+    expect(bookFor(store, 'MSFT')?.diagnostic?.message).toMatch(/^Gateway depth pending:/u)
+    expect(bookFor(store)?.diagnostic).toEqual({ code: 2152, message })
+  })
+})
+
+describe('per-symbol market streams', () => {
+  it('keeps one book per window symbol, releases with its window, and waits out IBKR limits', () => {
+    const { service, ib, store } = fixture()
+    const closeA = service.connectStreamClient('window-a')
+    const closeB = service.connectStreamClient('window-b')
+    service.getMarketDepth(symbol, 20, { clientId: 'window-a', claimId: 'a-book' })
+    const aaplId = ib.reqMktDepth.mock.lastCall?.[0]
+    service.getMarketDepth({ ...symbol, symbol: 'MSFT' }, 20, {
+      clientId: 'window-b',
+      claimId: 'b-book',
+    })
+    const msftId = ib.reqMktDepth.mock.lastCall?.[0]
+    ib.emit(EventName.updateMktDepth, aaplId, 0, 0, 1, 250, 10)
+    ib.emit(EventName.updateMktDepth, msftId, 0, 0, 1, 510, 20)
+    expect(ib.cancelMktDepth).not.toHaveBeenCalled()
+    expect(bookFor(store)?.bids).toEqual([{ price: 250, size: 10 }])
+    expect(bookFor(store, 'MSFT')?.bids).toEqual([{ price: 510, size: 20 }])
+
+    // A third book beyond the account limit waits; it never takes a slot from a window.
+    service.connectStreamClient('window-c')
+    service.getMarketDepth({ ...symbol, symbol: 'TSLA' }, 20, {
+      clientId: 'window-c',
+      claimId: 'c-book',
+    })
+    const tslaId = ib.reqMktDepth.mock.lastCall?.[0]
+    ib.emit(
+      EventName.error,
+      new Error('Max number (2) of market depth requests reached'),
+      309,
+      tslaId,
+    )
+    expect(bookFor(store, 'TSLA')?.diagnostic).toMatchObject({ code: 309 })
+    expect(ib.cancelMktDepth).not.toHaveBeenCalledWith(aaplId, true)
+
+    // Window A releases its book: it lingers briefly, then frees the slot for TSLA.
+    service.releaseStreamClaims(['a-book'], 'window-a')
+    vi.advanceTimersByTime(4_999)
+    expect(ib.cancelMktDepth).not.toHaveBeenCalledWith(aaplId, true)
+    vi.advanceTimersByTime(1)
+    expect(ib.cancelMktDepth).toHaveBeenCalledWith(aaplId, true)
+    expect(bookFor(store)).toBeUndefined()
+    expect(ib.reqMktDepth.mock.lastCall?.[1]).toMatchObject({ symbol: 'TSLA' })
+    expect(bookFor(store, 'MSFT')?.bids).toEqual([{ price: 510, size: 20 }])
+
+    // Window B closes: its book survives a reconnect allowance, then goes.
+    closeB()
+    vi.advanceTimersByTime(29_000)
+    expect(ib.cancelMktDepth).not.toHaveBeenCalledWith(msftId, true)
+    vi.advanceTimersByTime(11_000)
+    expect(ib.cancelMktDepth).toHaveBeenCalledWith(msftId, true)
+    closeA()
   })
 })

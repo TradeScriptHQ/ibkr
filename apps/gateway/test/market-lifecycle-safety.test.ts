@@ -72,15 +72,15 @@ describe('desired market subscriptions across socket generations', () => {
     runtime.ibkr.getMarketDepth(symbol, 8)
     const oldId = api.reqMktDepth.mock.calls.at(-1)?.[0]
     api.emit(EventName.updateMktDepth, oldId, 0, 0, 1, 100, 20)
-    expect(runtime.brokerStore.getState().marketDepth?.bids).toHaveLength(1)
+    expect(runtime.brokerStore.getState().marketDepths?.[0]?.bids).toHaveLength(1)
     api.emit(EventName.disconnected)
-    expect(runtime.brokerStore.getState().marketDepth).toMatchObject({
+    expect(runtime.brokerStore.getState().marketDepths?.[0]).toMatchObject({
       bids: [],
       asks: [],
       diagnostic: { message: expect.stringMatching(/disconnect|unavailable/i) },
     })
     api.emit(EventName.updateMktDepth, oldId, 0, 0, 1, 999, 20)
-    expect(runtime.brokerStore.getState().marketDepth?.bids).toEqual([])
+    expect(runtime.brokerStore.getState().marketDepths?.[0]?.bids).toEqual([])
     begin()
     expect(api.reqMktDepth).toHaveBeenCalledTimes(1)
     finish()
@@ -89,9 +89,9 @@ describe('desired market subscriptions across socket generations', () => {
     expect(newId).not.toBe(oldId)
     expect(api.reqMktDepth.mock.calls.at(-1)?.[2]).toBe(8)
     api.emit(EventName.updateMktDepth, oldId, 0, 0, 1, 999, 20)
-    expect(runtime.brokerStore.getState().marketDepth?.bids).toEqual([])
+    expect(runtime.brokerStore.getState().marketDepths?.[0]?.bids).toEqual([])
     api.emit(EventName.updateMktDepth, newId, 0, 0, 1, 101, 30)
-    expect(runtime.brokerStore.getState().marketDepth?.bids).toEqual([{ price: 101, size: 30 }])
+    expect(runtime.brokerStore.getState().marketDepths?.[0]?.bids).toEqual([{ price: 101, size: 30 }])
   })
 
   it('preserves an option SSE owner through disconnect and ignores late prices before a fresh ready stream', () => {
@@ -280,11 +280,40 @@ describe('provider history boundaries', () => {
   ])('preserves 162 failure for %s', async (message, statusCode) => {
     const { api, requests } = requestsFixture()
     const result = requests.requestHistoricalBars(
-      { conId: 1 },
+      { conId: 1, symbol: 'AAPL' },
       { endDateTime: '', duration: '1 D', barSize: BarSizeSetting.DAYS_ONE },
     )
     api.emit(EventName.error, new Error(message), 162, api.reqHistoricalData.mock.calls[0]?.[0])
-    await expect(result).rejects.toMatchObject({ statusCode })
+    await expect(result).rejects.toMatchObject({
+      statusCode,
+      code: 'market-data-rejected',
+      message: `IBKR rejected the chart history request for AAPL: ${message} (IBKR 162)`,
+    })
+  })
+  it('reports an unanswered history request as a typed timeout and cancels it', async () => {
+    vi.useFakeTimers()
+    try {
+      const { api, requests } = requestsFixture()
+      const result = requests.requestHistoricalBars(
+        { conId: 1, symbol: 'AAPL' },
+        { endDateTime: '', duration: '1 D', barSize: BarSizeSetting.DAYS_ONE },
+      )
+      const assertion = expect(result).rejects.toMatchObject({
+        statusCode: 504,
+        code: 'market-data-timeout',
+        message:
+          'IBKR accepted the chart history request for AAPL but sent no data within 20 seconds. If this continues, restart TWS or IB Gateway and log in again.',
+      })
+      await vi.advanceTimersByTimeAsync(20_000)
+      await assertion
+      expect(api.cancelHistoricalData).toHaveBeenCalledWith(
+        api.reqHistoricalData.mock.calls[0]?.[0],
+      )
+      expect(api.listenerCount(EventName.historicalData)).toBe(0)
+      expect(api.listenerCount(EventName.error)).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
   it('keeps calendar coverage at the returned broker boundary instead of extending the reference day', async () => {
     const { api, requests } = requestsFixture()

@@ -5,6 +5,7 @@ import type {
   RiskPolicyUtilizationSource,
   SdkSymbolInfo,
   TradingCurrencyConversion,
+  TradingEvent,
   TradingOrder,
   TradingOrderDraft,
   TradingPosition,
@@ -326,12 +327,12 @@ async function riskHarness(
     ordersHistory: options.ordersHistory ?? [],
     activeAccountId: 'paper-risk',
   }
-  let subscriber: (() => void) | undefined
+  let subscriber: ((event: TradingEvent) => void) | undefined
   const getState = vi.fn(async () => state)
   const broker = {
     getTradingSymbolInfo,
     getState,
-    subscribe(callback: () => void) {
+    subscribe(callback: (event: TradingEvent) => void) {
       subscriber = callback
       return () => {
         subscriber = undefined
@@ -373,8 +374,8 @@ async function riskHarness(
     updateState(next: Partial<TradingState>) {
       state = { ...state, ...next }
     },
-    refresh() {
-      subscriber?.()
+    refresh(event: TradingEvent = { type: 'positions', positions: state.positions }) {
+      subscriber?.(event)
     },
     place(draft: TradingOrderDraft) {
       return authority.requests.placeOrder?.({
@@ -1236,6 +1237,29 @@ it('uses completed orders in the trailing-minute count without counting an activ
   }
 })
 
+it('bounds completed orders without a submission time by when they completed', async () => {
+  const completed = (id: string, completedAgoMs: number): TradingOrder => ({
+    id,
+    accountId: 'paper-risk',
+    symbol: stockPosition.symbol,
+    side: 'sell',
+    type: 'market',
+    quantity: 1,
+    status: 'filled',
+    updatedAt: Date.now() - completedAgoMs,
+  })
+  const harness = await riskHarness({
+    ordersHistory: [completed('recent', 5_000), completed('morning', 3_600_000)],
+  })
+  try {
+    expect(harness.utilization?.getCurrentUtilization().accounts).toEqual([
+      expect.objectContaining({ ordersInLastMinute: 1 }),
+    ])
+  } finally {
+    harness.authority.destroy()
+  }
+})
+
 it('does not replace unavailable broker daily PnL with a connection-time equity baseline', async () => {
   const harness = await riskHarness({
     accounts: [
@@ -1372,6 +1396,35 @@ it('blocks stale position exposure after a failed refresh and recovers only afte
       }),
     ).toMatchObject({ projectedPositionQuantity: 4 })
   } finally {
+    harness.authority.destroy()
+  }
+})
+
+it('ignores broker logs and fails a risk check whose broker facts never settle', async () => {
+  const harness = await riskHarness()
+  try {
+    harness.refresh({
+      type: 'log',
+      entry: {
+        id: 'fx-200',
+        level: 'error',
+        source: 'adapter',
+        message: 'Error 200',
+        time: Date.now(),
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(harness.getState).toHaveBeenCalledTimes(1)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    harness.getState.mockImplementationOnce(() => new Promise<TradingState>(() => undefined))
+    harness.refresh()
+    const placed = expect(
+      harness.place({ symbol: stockPosition.symbol, side: 'buy', type: 'market', quantity: 1 }),
+    ).rejects.toThrow(/did not settle within 12 seconds/)
+    await vi.advanceTimersByTimeAsync(12_000)
+    await placed
+  } finally {
+    vi.useRealTimers()
     harness.authority.destroy()
   }
 })

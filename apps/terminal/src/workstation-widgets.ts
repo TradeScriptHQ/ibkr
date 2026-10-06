@@ -71,6 +71,7 @@ export const WORKSTATION_WIDGETS: Pick<
   },
   accountPanelOptions: {
     showAccountTitle: false,
+    density: 'compact',
     defaultPageId: 'positions',
     messageAutoDismissMs: WORKSTATION_MESSAGE_AUTO_DISMISS_MS,
   },

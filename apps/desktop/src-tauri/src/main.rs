@@ -58,6 +58,9 @@ fn create_main_window(app: &tauri::App, url: tauri::Url) -> tauri::Result<()> {
         .title(&app.package_info().name)
         .inner_size(1440.0, 960.0)
         .min_inner_size(900.0, 600.0)
+        // Tauri's native file-drop handler claims every drag, so the page would never
+        // receive dragover/drop and workspace tabs could not be rearranged.
+        .disable_drag_drop_handler()
         .on_navigation(move |url| navigation_allowed(url, &origin));
     #[cfg(target_os = "macos")]
     let window = window

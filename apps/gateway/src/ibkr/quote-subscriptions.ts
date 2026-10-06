@@ -49,6 +49,9 @@ interface QuoteSubscription {
   pendingAskPrice?: number | undefined
 }
 
+/** IBKR: no market data during a competing live session. */
+const IBKR_COMPETING_LIVE_SESSION = 10197
+
 /** Owns quote subscriptions, retry timers, tick decoding and reconnect recovery. */
 export class QuoteSubscriptions {
   constructor(
@@ -269,6 +272,18 @@ export class QuoteSubscriptions {
     })
     this.scheduleQuoteRetry(key, subscription)
     return true
+  }
+
+  /** Whether an active quote stream reports that another session is using live market data. */
+  competingLiveSessionReported(): boolean {
+    const active = new Set(this.quoteSubscriptions.keys())
+    return this.store
+      .getState()
+      .quotes.some(
+        (quote) =>
+          quote.ibkrErrorCode === IBKR_COMPETING_LIVE_SESSION &&
+          active.has(brokerSymbolKey(quote.symbol)),
+      )
   }
 
   findQuote(symbol: BrokerSymbol): MarketQuote | undefined {

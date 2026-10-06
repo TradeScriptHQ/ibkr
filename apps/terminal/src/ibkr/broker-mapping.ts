@@ -228,7 +228,7 @@ export function toTradingOrder(order: BackendOrder): TradingOrder {
     hidden: order.hidden,
     averagePrice: order.avgFillPrice,
     duration: toTradingDuration(order.duration, order.durationDateTime),
-    createdAt: Date.parse(order.submittedAt),
+    createdAt: order.submittedAt === undefined ? undefined : Date.parse(order.submittedAt),
     updatedAt: Date.parse(order.updatedAt),
     message:
       (transmission.message?.trim() ? transmission.message : undefined) ??
