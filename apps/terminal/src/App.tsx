@@ -2,8 +2,8 @@ import type { SdkSymbolInfo } from '@tradescript/pro/sdk'
 import { useEffect, useRef, useState } from 'react'
 import { AgentTradingButton } from './agent-trading.js'
 import { AppNotification } from './app-notifications.js'
-import { AppearanceToggle } from './appearance-ui.js'
-import { ApplicationSettingsButton } from './application-setup.js'
+import { AppearanceToggle, AppModal } from './appearance-ui.js'
+import { ApplicationSettingsButton, type ApplicationSettingsState } from './application-setup.js'
 import { retryConnection } from './connection-client.js'
 import { ConnectionHealth, ConnectionRetry, useConnectionHealth } from './connection-health.js'
 import { ConnectionSettingsButton } from './connection-settings.js'
@@ -18,7 +18,13 @@ import {
 import { type WorkstationSetupState, workstationLoading } from './workstation-startup.js'
 
 const MOCK_MODE = import.meta.env.VITE_TRADING_MODE === 'mock'
-export function App({ setup }: { setup: WorkstationSetupState }) {
+export function App({
+  setup,
+  settings,
+}: {
+  setup: WorkstationSetupState
+  settings: ApplicationSettingsState
+}) {
   const [activeInstrument, setActiveInstrument] = useState<SdkSymbolInfo>()
   const terminalHost = useRef<HTMLDivElement>(null)
   const topbar = useRef<HTMLElement>(null)
@@ -176,28 +182,7 @@ export function App({ setup }: { setup: WorkstationSetupState }) {
         {MOCK_MODE && <span className="header-simulation">Simulated session</span>}
         <div className="toolbar-utilities">
           <AppearanceToggle />
-          {!MOCK_MODE && setup.ready && <ApplicationSettingsButton />}
-          <button
-            type="button"
-            className="chart-data-action"
-            aria-label="Chart data"
-            title="View chart data"
-            disabled={loadState.state !== 'ready'}
-            onClick={() => void openChartData()}
-          >
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 20 20"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              aria-hidden="true"
-            >
-              <rect x="3" y="3" width="14" height="14" rx="2" />
-              <path d="M3 8h14M8 8v9M3 12.5h14" />
-            </svg>
-          </button>
+          {setup.ready && <ApplicationSettingsButton />}
           <DesktopUpdates />
         </div>
       </TerminalToolbar>
@@ -234,6 +219,43 @@ export function App({ setup }: { setup: WorkstationSetupState }) {
           </div>
         )}
       </section>
+      {setup.ready && (
+        <AppModal
+          open={settings.open}
+          onOpenChange={settings.onOpenChange}
+          title="Application settings"
+          width="540px"
+          boundary="viewport"
+          contentClassName="application-settings-body"
+          closeLabel="Close application settings"
+          headerDensity="compact"
+          closeDisabled={settings.busy}
+        >
+          <div className="setup-content setup-settings">
+            {settings.content}
+            <section
+              className="setup-settings-section setup-saved-connection"
+              aria-label="Chart data"
+            >
+              <div>
+                <strong>Chart data</strong>
+                <p>Inspect prices and volume for the current chart.</p>
+              </div>
+              <button
+                type="button"
+                aria-label="Chart data"
+                disabled={settings.busy || loadState.state !== 'ready'}
+                onClick={() => {
+                  settings.onOpenChange(false)
+                  void openChartData()
+                }}
+              >
+                View chart data
+              </button>
+            </section>
+          </div>
+        </AppModal>
+      )}
       {chartDataOpen && (
         <div className="chart-data-backdrop" role="presentation">
           <section

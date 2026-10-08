@@ -17,15 +17,21 @@ import { createIbkrHttpBrokerAdapter } from './ibkr/http-broker-adapter.js'
 import { createIbkrMarketDatafeed } from './ibkr/market-datafeed.js'
 import { followOptionTicketRejections } from './ibkr/option-ticket-rejection.js'
 import { loadForecastOutcomes } from './ibkr/prediction-ticket.js'
+import { IBKR_DEFAULT_SYMBOLS, IBKR_SAVED_VIEWS } from './ibkr/symbol-search-presets.js'
 import { followInstrument, readInstrument } from './instrument-preference.js'
 import { createMcpAgentConsoleController } from './mcp/agent-console.js'
 import { connectTradeScriptMcp } from './mcp/browser-bridge.js'
-import { createLocalSimulation, MOCK_ACCOUNT_ID } from './mock/local-simulation.js'
+import {
+  createLocalSimulation,
+  MOCK_ACCOUNT_ID,
+  MOCK_DEFAULT_SYMBOLS,
+} from './mock/local-simulation.js'
 import {
   createOptionChainGreeksStore,
   createOptionChainGreeksToggle,
   optionChainColumns,
 } from './option-chain-greeks.js'
+import { createOptionChartBridge } from './option-chart-bridge.js'
 import type { ConnectionRiskAuthority } from './risk.js'
 import { followSdkLease } from './sdk-lease-renewal.js'
 import { createTerminalTradeScriptSdk, currentCsrfToken } from './terminal-session.js'
@@ -44,6 +50,7 @@ import {
   licensedWorkstationSessionMeta,
   licensedWorkstationWidgets,
   WORKSTATION_MESSAGE_AUTO_DISMISS_MS,
+  withSymbolSearchPresets,
 } from './workstation-widgets.js'
 
 export type LoadState =
@@ -133,7 +140,12 @@ export function createWorkstation({
     if (lifetime.disposed) {
       return
     }
-    const widgets = licensedWorkstationWidgets(sdk.authorization?.snapshot().policy)
+    const widgets = withSymbolSearchPresets(
+      licensedWorkstationWidgets(sdk.authorization?.snapshot().policy),
+      mockMode
+        ? { defaultSymbols: MOCK_DEFAULT_SYMBOLS }
+        : { savedViews: IBKR_SAVED_VIEWS, defaultSymbols: IBKR_DEFAULT_SYMBOLS },
+    )
     if (sdk.authorization)
       lifetime.defer(
         followSdkLease(sdk.authorization, bootstrap, controller.signal, (message) => {
@@ -313,6 +325,10 @@ export function createWorkstation({
     const depthRows = createDepthRowExtension()
     const greeks = createOptionChainGreeksStore(localStorage)
     const greeksToggle = createOptionChainGreeksToggle(greeks)
+    const optionChartOptions = {
+      chartBridge: createOptionChartBridge(broker, mockMode ? 'mock' : 'ibkr'),
+      initialWidthFraction: 0.4,
+    }
     const optionChainOptions = () => ({
       ...widgets.optionChainOptions,
       columns: optionChainColumns(widgets.optionChainOptions?.columns ?? [], greeks.getSnapshot()),
@@ -354,6 +370,14 @@ export function createWorkstation({
 
       agentConsoleOptions: { controller: agentConsole },
 
+      layoutOptions: {
+        tabAppearance: 'pill',
+        tabIndicatorColor: '#2f64ff',
+        showHotkeySetupAction: false,
+        showPopoutAction: true,
+        popoutUrl: '/workspace-popout.html',
+      },
+
       optionTicketOptions: {
         messageAutoDismissMs: WORKSTATION_MESSAGE_AUTO_DISMISS_MS,
         onReady(controller) {
@@ -363,6 +387,7 @@ export function createWorkstation({
       },
 
       optionChainOptions: optionChainOptions(),
+      ...{ optionChartOptions },
 
       depthLadderOptions: {
         priceWindow: 'follow-price',
@@ -408,7 +433,11 @@ export function createWorkstation({
         requestAnimationFrame(() => {
           if (lifetime.disposed) return
           destroyLayoutSizing?.()
-          destroyLayoutSizing = arrangeDesktopWorkstation(layout, host)
+          destroyLayoutSizing = arrangeDesktopWorkstation(
+            layout,
+            host,
+            optionChartOptions.initialWidthFraction,
+          )
         })
       },
       onTerminalReady(api) {

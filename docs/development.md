@@ -31,6 +31,32 @@ own instructions before modifying it; record public-contract issues in [SDK issu
 
 ## State locations
 
+### Symbol logos
+
+Set `VITE_LOGO_DEV_PUBLISHABLE_KEY` to your Logo.dev `pk_` key in the root `.env`
+for development/local builds, or in the release repository's Actions variables.
+The key is intentionally included in the frontend bundle; secret `sk_` keys are
+rejected. Without a key, the SDK keeps its initials tiles.
+
+Stock/ETF logos use the ISIN returned by IBKR when available. Known US listings
+can use their ticker before ISIN qualification; other listings without an ISIN
+keep initials. Crypto uses Logo.dev's crypto lookup. Forex, derivatives and other
+unsupported instruments keep initials. Missing logos and failed requests also
+use the SDK's existing initials fallback.
+
+Images load directly from Logo.dev with stable URLs. Its
+[HTTP cache headers](https://www.logo.dev/docs/platform/caching) allow the desktop
+WebView to reuse images for 24 hours. No logo proxy, bulk downloads or separate
+disk cache is created. A persistent offline collection would require the
+[download API](https://www.logo.dev/docs/platform/self-hosting) with a server-held
+secret key. Domain restrictions must allow the development `localhost` and
+packaged desktop `127.0.0.1` origins; a restriction with no matching Referer rejects
+the image. Individually maintained, noncommercial open-source releases do not
+require [attribution](https://www.logo.dev/docs/platform/attribution); commercial
+releases using the Community plan require the documented public credit.
+
+### Application state
+
 | Environment | Persistent state | SDK credential storage |
 | --- | --- | --- |
 | Browser/source development | `.local/state`, or `TERMINAL_DATA_DIR` | Owner-only local credential file; `.env` overrides also supported |

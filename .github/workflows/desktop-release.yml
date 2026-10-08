@@ -30,6 +30,7 @@ jobs:
     env:
       TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
       RELEASE_VERSION: ${{ inputs.version }}
+      VITE_LOGO_DEV_PUBLISHABLE_KEY: ${{ vars.VITE_LOGO_DEV_PUBLISHABLE_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

@@ -14,6 +14,7 @@ import type {
 } from './datafeed-types.js'
 import { TOP_OF_BOOK_DEPTH_MAX_AGE_MS } from './datafeed-types.js'
 import { withoutUndefined } from './defined-fields.js'
+import { symbolLogoUrl } from './symbol-logos.js'
 
 export function toSessionWindow(window: BackendSessionWindow): SessionWindow {
   return withoutUndefined<SessionWindow>({
@@ -268,8 +269,12 @@ export function symbolKey(symbol: string | SymbolInfo): string {
 export function toSymbolInfo(symbol: BackendMarketSymbol): SymbolInfo {
   const minTick = symbol.minTick
   const tickScale = minTick ? tickScaleFromTick(minTick) : undefined
+  const optionInstrument = symbol.option
+    ? { ...symbol.option, underlyingSymbolInfo: toSymbolInfo(symbol.option.underlyingSymbolInfo) }
+    : undefined
   return withoutUndefined<SymbolInfo>({
     ...(symbol.prediction ? { instrument: symbol.prediction } : {}),
+    ...(optionInstrument ? { instrument: optionInstrument } : {}),
     ticker: symbol.ticker,
     exchange: symbol.exchange,
     listedExchange: symbol.primaryExchange,
@@ -278,6 +283,7 @@ export function toSymbolInfo(symbol: BackendMarketSymbol): SymbolInfo {
     name: symbol.name,
     description: symbol.description,
     type: symbol.type,
+    logoUrl: symbolLogoUrl(symbol),
     currency: symbol.currency,
     pricePrecision: minTick ? precisionFromTick(minTick) : undefined,
     tickSize: minTick,

@@ -12,11 +12,10 @@ export function activateWorkstationWidget(
 export function arrangeDesktopWorkstation(
   layout: PanelLayoutControllerApi,
   host: HTMLDivElement,
+  contractChartWidthFraction: number,
 ): () => void {
   if (host.clientWidth < 1_100) return () => undefined
 
-  const maxWatchlistWidth = 344
-  const maxOrderTicketWidth = 400
   const scheduledFrames = new Set<number>()
   let stopped = false
   let removeResizeListener: (() => void) | undefined
@@ -73,22 +72,7 @@ export function arrangeDesktopWorkstation(
   move('agent-console', 'order-ticket', 'within')
 
   const applyPanelSizes = () => {
-    const workspaceWidth = host.clientWidth
-    const workspaceHeight = host.clientHeight
-    const orderTicketWidth = Math.min(Math.round(workspaceWidth * 0.23), maxOrderTicketWidth)
-    const watchlistWidth = Math.min(Math.round(workspaceWidth * 0.2), maxWatchlistWidth)
-    const resize = (widgetType: string, size: { width?: number; height?: number }) => {
-      const target = panel(widgetType)
-      if (target) layout.resizePanel(target.panelId, size)
-    }
-
-    resize('chart', { width: workspaceWidth - orderTicketWidth - watchlistWidth })
-    resize('order-ticket', { width: orderTicketWidth })
-    resize('watchlist', { width: watchlistWidth })
-    resize('account', {
-      width: Math.round(workspaceWidth * 0.46),
-      height: Math.round(workspaceHeight * 0.32),
-    })
+    resizeDesktopWorkstation(layout, host, contractChartWidthFraction)
   }
 
   schedule(() => {
@@ -136,4 +120,34 @@ export function arrangeDesktopWorkstation(
     for (const frame of scheduledFrames) cancelAnimationFrame(frame)
     scheduledFrames.clear()
   }
+}
+
+export function resizeDesktopWorkstation(
+  layout: Pick<PanelLayoutControllerApi, 'listPanels' | 'resizePanel'>,
+  host: Pick<HTMLDivElement, 'clientWidth' | 'clientHeight'>,
+  contractChartWidthFraction: number,
+): void {
+  const panels = layout.listPanels()
+  const orderTicketWidth = Math.min(Math.round(host.clientWidth * 0.23), 400)
+  const watchlistWidth = Math.min(Math.round(host.clientWidth * 0.2), 344)
+  const analysisWidth = host.clientWidth - orderTicketWidth - watchlistWidth
+  const contractChart = panels.find(
+    (panel) => panel.widgetType === 'contract-chart' && panel.location === 'grid',
+  )
+  const contractChartWidth = contractChart
+    ? Math.round(analysisWidth * contractChartWidthFraction)
+    : 0
+  const resize = (widgetType: string, size: { width?: number; height?: number }) => {
+    const target = panels.find((panel) => panel.widgetType === widgetType)
+    if (target) layout.resizePanel(target.panelId, size)
+  }
+
+  resize('chart', { width: analysisWidth - contractChartWidth })
+  resize('order-ticket', { width: orderTicketWidth })
+  resize('watchlist', { width: watchlistWidth })
+  if (contractChart) layout.resizePanel(contractChart.panelId, { width: contractChartWidth })
+  resize('account', {
+    width: Math.round(host.clientWidth * 0.46),
+    height: Math.round(host.clientHeight * 0.32),
+  })
 }

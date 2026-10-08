@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "workstation",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3000,
+      "url": "http://localhost:3000"
+    },
+    {
+      "name": "charts-pro-preview",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd /Users/miyuru/Repos/TradeMind/charts-pro && exec npx vite --port 5318 --strictPort"],
+      "port": 5318
+    }
+  ]
+}

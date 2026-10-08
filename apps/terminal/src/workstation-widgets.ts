@@ -1,4 +1,8 @@
-import type { ChartAuthorizationSnapshot } from '@tradescript/pro/sdk'
+import type {
+  ChartAuthorizationSnapshot,
+  SymbolInfo,
+  SymbolSearchSavedView,
+} from '@tradescript/pro/sdk'
 import type { createTerminalTradeScriptSdk } from './terminal-session.js'
 
 export const WORKSTATION_MESSAGE_AUTO_DISMISS_MS = 5_000
@@ -165,4 +169,31 @@ export function licensedWorkstationSessionMeta(
 ) {
   if (policy !== undefined && !policy.modules.includes('session-badge')) return undefined
   return { variant: 'full' as const, showHotkeySetupButton: false }
+}
+
+/** Symbol-picker presets owned by the active market-data provider. */
+export interface SymbolSearchPresets {
+  savedViews?: SymbolSearchSavedView[]
+  /** The provider's own search rows, listed before the user types. */
+  defaultSymbols: readonly SymbolInfo[]
+}
+
+/** Adds the active provider's symbol-picker presets to the workstation chart. */
+export function withSymbolSearchPresets(
+  widgets: typeof WORKSTATION_WIDGETS,
+  presets: SymbolSearchPresets,
+): typeof WORKSTATION_WIDGETS {
+  return {
+    ...widgets,
+    chartOptions: {
+      ...widgets.chartOptions,
+      features: {
+        ...widgets.chartOptions?.features,
+        symbolSearch: {
+          ...(presets.savedViews ? { savedViews: presets.savedViews } : {}),
+          defaultSymbols: [...presets.defaultSymbols],
+        },
+      },
+    },
+  }
 }

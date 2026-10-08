@@ -1,3 +1,4 @@
+import { chartDataButton } from '../support/chart-data.js'
 import { expect, test } from '../support/fixtures.js'
 
 // The real proxy, SDK startup and paper guard remain in place. Only read-only historical
@@ -29,14 +30,16 @@ for (const fallback of ['empty', 'unavailable'] as const) {
 
     await page.goto('/')
     await expect(page.getByRole('region', { name: 'IBKR Chart', exact: true })).toBeVisible()
-    const open = page.getByRole('button', { name: 'Chart data', exact: true })
-    await expect(open).toBeEnabled()
+    const open = await chartDataButton(page)
     await expect.poll(() => startupRequests).toBeGreaterThan(0)
     openingDialog = true
     await open.click()
 
     const dialog = page.getByRole('dialog', { name: 'AAPL chart data', exact: true })
     await expect(dialog).toBeVisible()
+    await expect(
+      page.getByRole('dialog', { name: 'Application settings', exact: true }),
+    ).toHaveCount(0)
     await expect(dialog.getByText('5m bars · newest first', { exact: true })).toBeVisible()
     await expect.poll(() => fallbackInterval).toBe('5m')
     await expect.poll(() => fallbackSymbol).toBe('AAPL')
@@ -54,7 +57,7 @@ for (const fallback of ['empty', 'unavailable'] as const) {
     }
     await dialog.getByRole('button', { name: 'Close', exact: true }).click()
     await expect(dialog).toHaveCount(0)
-    await expect(open).toBeEnabled()
+    await expect(await chartDataButton(page)).toBeEnabled()
     await page.unrouteAll({ behavior: 'wait' })
   })
 }
@@ -69,7 +72,7 @@ test('chart data captures the interval selected through the chart controls', asy
   await page.getByRole('button', { name: 'Intervals', exact: true }).click()
   await page.getByRole('button', { name: '15m', exact: true }).last().click()
   await expect.poll(() => selectedInterval).toBe('15m')
-  await page.getByRole('button', { name: 'Chart data', exact: true }).click()
+  await (await chartDataButton(page)).click()
   const dialog = page.getByRole('dialog', { name: 'AAPL chart data', exact: true })
   await expect(dialog).toBeVisible()
   await expect(dialog.getByText('15m bars · newest first', { exact: true })).toBeVisible()
@@ -104,16 +107,20 @@ test('chart data preserves provider-declared forex precision for synthetic histo
   })
   await page.goto('/')
   await page.getByRole('button', { name: /^Change symbol / }).click()
-  await page.getByRole('button', { name: 'Forex', exact: true }).click()
-  await page.getByPlaceholder('Symbol', { exact: true }).fill('EURUSD')
   await page
-    .getByRole('listitem')
+    .getByLabel('Asset type', { exact: true })
+    .getByRole('button', { name: 'Forex', exact: true })
+    .click()
+  await page.getByRole('combobox', { name: 'Search symbols', exact: true }).fill('EURUSD')
+  await page
+    .getByRole('listbox', { name: 'Assets', exact: true })
+    .getByRole('option')
     .filter({ has: page.getByText('EURUSD', { exact: true }) })
     .first()
     .click()
   await expect.poll(() => forexHistoryRequests).toBeGreaterThan(0)
   openingDialog = true
-  await page.getByRole('button', { name: 'Chart data', exact: true }).click()
+  await (await chartDataButton(page)).click()
   const dialog = page.getByRole('dialog', { name: 'EURUSD chart data', exact: true })
   await expect(dialog).toBeVisible()
   await expect.poll(() => fallbackSymbol).toBe('EURUSD')

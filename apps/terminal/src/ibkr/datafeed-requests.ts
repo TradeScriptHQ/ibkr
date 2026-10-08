@@ -8,6 +8,7 @@ import type {
   SessionAggregationCalendar,
   SessionAggregationCalendarRequest,
   SessionInfo,
+  SparklineSeries,
   SymbolInfo,
   TimeAndSalesEntry,
   TimeAndSalesRequest,
@@ -27,6 +28,7 @@ import type {
   BackendQuote,
   BackendSessionCalendar,
   BackendSessionInfo,
+  BackendSymbolSparkline,
 } from './datafeed-types.js'
 import { withoutUndefined } from './defined-fields.js'
 import type { BackendOptionChainResult } from './types'
@@ -154,10 +156,15 @@ export async function getQuotes(
   })
 }
 
-export async function getBackendQuotes(
-  baseUrl: string,
-  symbols: Array<string | SymbolInfo>,
-): Promise<BackendQuote[]> {
+/**
+ * Splits symbols into requests that share one contract identity (exchange,
+ * listing exchange, currency, asset class), the shape the gateway's batch
+ * routes accept: each request carries the symbols plus their shared metadata.
+ */
+function contractIdentityRequests(symbols: Array<string | SymbolInfo>): Array<{
+  symbols: Array<string | SymbolInfo>
+  params: URLSearchParams
+}> {
   const groups = new Map<string, Array<string | SymbolInfo>>()
   for (const symbol of symbols) {
     const key =
@@ -168,20 +175,53 @@ export async function getBackendQuotes(
     group.push(symbol)
     groups.set(key, group)
   }
+  return [...groups.values()].map((group) => {
+    const params = new URLSearchParams()
+    const metadata = sharedQuoteMetadata(group)
+    for (const symbol of group) params.append('symbol', requestedSymbolText(symbol))
+    if (metadata.exchange) params.set('exchange', metadata.exchange)
+    if (metadata.primaryExchange) params.set('primaryExchange', metadata.primaryExchange)
+    if (metadata.currency) params.set('currency', metadata.currency)
+    if (metadata.assetClass) params.set('assetClass', metadata.assetClass)
+    return { symbols: group, params }
+  })
+}
+
+function requestedSymbolText(symbol: string | SymbolInfo): string {
+  return typeof symbol === 'string' ? symbol : (symbol.brokerSymbol ?? symbol.ticker)
+}
+
+export async function getBackendQuotes(
+  baseUrl: string,
+  symbols: Array<string | SymbolInfo>,
+): Promise<BackendQuote[]> {
   const results = await Promise.all(
-    [...groups.values()].map(async (group) => {
-      const params = new URLSearchParams()
-      const metadata = sharedQuoteMetadata(group)
-      for (const symbol of group)
-        params.append(
-          'symbol',
-          typeof symbol === 'string' ? symbol : (symbol.brokerSymbol ?? symbol.ticker),
+    contractIdentityRequests(symbols).map(({ params }) =>
+      get<BackendQuote[]>(baseUrl, `/quotes?${params.toString()}`),
+    ),
+  )
+  return results.flat()
+}
+
+/**
+ * Recent-close lines for search rows. The gateway answers each identity
+ * request with the symbols it could load, echoing the requested symbol text,
+ * which maps each line back to the exact requested row.
+ */
+export async function getSparklines(
+  baseUrl: string,
+  symbols: SymbolInfo[],
+): Promise<SparklineSeries[]> {
+  const results = await Promise.all(
+    contractIdentityRequests(symbols).map(async ({ symbols: group, params }) => {
+      const lines = await get<BackendSymbolSparkline[]>(baseUrl, `/sparklines?${params.toString()}`)
+      return lines.flatMap((line) => {
+        const requested = group.find(
+          (symbol): symbol is SymbolInfo =>
+            typeof symbol !== 'string' && requestedSymbolText(symbol) === line.symbol.symbol,
         )
-      if (metadata.exchange) params.set('exchange', metadata.exchange)
-      if (metadata.primaryExchange) params.set('primaryExchange', metadata.primaryExchange)
-      if (metadata.currency) params.set('currency', metadata.currency)
-      if (metadata.assetClass) params.set('assetClass', metadata.assetClass)
-      return get<BackendQuote[]>(baseUrl, `/quotes?${params.toString()}`)
+        return requested ? [{ symbol: requested, values: line.values }] : []
+      })
     }),
   )
   return results.flat()

@@ -59,6 +59,10 @@ test('activated application settings show saved access without onboarding or bla
   const dialog = await openSettings(page)
   await expect(dialog.getByText('SDK credentials saved · Activated', { exact: true })).toBeVisible()
   await expect(dialog.getByText('Connection settings saved', { exact: true })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Chart data', exact: true })).toBeVisible()
+  await expect(
+    page.getByRole('banner').getByRole('button', { name: 'Chart data', exact: true }),
+  ).toHaveCount(0)
   await expect(
     dialog.getByRole('button', { name: 'Replace credentials', exact: true }),
   ).toBeVisible()

@@ -20,6 +20,30 @@ import { IbkrRequests } from '../src/ibkr/ibkr-requests.js'
 import { IbkrService } from '../src/ibkr/ibkr-service.js'
 import { BrokerStateStore } from '../src/ibkr/state-store.js'
 
+it('carries the broker ISIN from a qualified stock listing for issuer logo lookup', () => {
+  const symbol = toMarketSymbol({
+    contract: {
+      conId: 38708077,
+      secType: SecType.STK,
+      symbol: 'AAPL',
+      exchange: 'SMART',
+      primaryExch: 'MEXI',
+      currency: 'MXN',
+    },
+    secIdList: [
+      { tag: 'CUSIP', value: '037833100' },
+      { tag: 'ISIN', value: ' US0378331005 ' },
+    ],
+  })
+  expect(symbol).toMatchObject({
+    ticker: 'AAPL',
+    canonicalSymbol: 'IBKR:38708077',
+    primaryExchange: 'MEXI',
+    currency: 'MXN',
+    isin: 'US0378331005',
+  })
+})
+
 function fixture(details: ContractDetails[], bond = false) {
   const emitter = new EventEmitter()
   const reqContractDetails = vi.fn((id: number, _contract: Contract) =>

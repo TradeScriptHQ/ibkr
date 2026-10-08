@@ -43,7 +43,7 @@ test('the source SDK adopts verified simulated agent authority while retaining t
   }
   await page.route('**/api/v1/tradescript/bootstrap', (route) => route.fulfill({ json: bootstrap }))
   await page.goto('/', { waitUntil: 'domcontentloaded' })
-  await expect(page.getByRole('button', { name: 'Chart data', exact: true })).toBeEnabled()
+  await expect(page.locator('.terminal-frame:not(:has(.terminal-overlay))')).toBeVisible()
   await page.getByText('Agent Console', { exact: true }).click()
   await expect(
     page.getByRole('button', { name: /Capabilities .*paper agent trading$/ }),

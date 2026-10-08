@@ -4,6 +4,7 @@ import {
   licensedWorkstationWidgets,
   WORKSTATION_MESSAGE_AUTO_DISMISS_MS,
   WORKSTATION_WIDGETS,
+  withSymbolSearchPresets,
 } from './workstation-widgets.js'
 
 const chartModules = ['terminal', 'chart.core', 'chart.market-data', 'chart']
@@ -99,4 +100,17 @@ describe('workstation message lifetime', () => {
       'ask',
     ])
   })
+})
+
+it('adds the active provider symbol-picker presets without dropping chart features', () => {
+  const defaultSymbols = [{ ticker: 'AAPL', canonicalSymbol: 'IBKR:265598' }]
+  const savedViews = [{ id: 'cme', label: 'CME', assetType: 'futures' as const, exchange: 'CME' }]
+  const widgets = withSymbolSearchPresets(WORKSTATION_WIDGETS, { savedViews, defaultSymbols })
+  expect(widgets.chartOptions?.features).toMatchObject({
+    sessionBadge: false,
+    symbolSearch: { savedViews, defaultSymbols },
+  })
+  const mock = withSymbolSearchPresets(WORKSTATION_WIDGETS, { defaultSymbols })
+  expect(mock.chartOptions?.features?.symbolSearch).toEqual({ defaultSymbols })
+  expect(WORKSTATION_WIDGETS.chartOptions?.features).toEqual({ sessionBadge: false })
 })

@@ -1,6 +1,7 @@
 import type { OptionChainResult } from '@ibkr-terminal/contracts'
 import type { Page } from '@playwright/test'
 import { currentAccountPanelMismatches } from './support/account-panel-check.js'
+import { chartDataButton } from './support/chart-data.js'
 import { expect, test } from './support/fixtures.js'
 import { resolveUsStock, select } from './support/instrument-contracts.js'
 import { browserHeaders, expectJsonOk, openTerminalSession } from './support/session.js'
@@ -232,7 +233,7 @@ test.describe('TradeScript terminal UI', () => {
       await expect(book.getByText('Best ask', { exact: true })).toBeVisible()
 
     await page.getByRole('tab', { name: /IBKR Chart/u }).click()
-    await page.getByRole('button', { name: 'Chart data', exact: true }).click()
+    await (await chartDataButton(page)).click()
     await expect(page.getByRole('dialog')).toBeVisible()
     await expect(page.getByRole('dialog').getByRole('table')).toBeVisible()
     expect(await page.getByRole('dialog').getByRole('row').count()).toBeGreaterThan(1)

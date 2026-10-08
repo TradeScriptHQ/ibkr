@@ -330,6 +330,26 @@ export function registerIbkrRoutes(app: FastifyInstance, options: IbkrRouteOptio
     )
   })
 
+  app.get('/api/v1/ibkr/sparklines', authenticated, async (request) => {
+    const { ibkr } = options
+    const query = request.query as Record<string, string | string[] | undefined>
+    const rawSymbols = Array.isArray(query.symbol) ? query.symbol : [query.symbol ?? '']
+    const symbols = rawSymbols.flatMap((value) => value.split(',')).filter(Boolean)
+    return ibkr.getSparklines(
+      symbols.map(
+        (symbol): BrokerSymbol => ({
+          symbol,
+          ...(typeof query.exchange === 'string' ? { exchange: query.exchange } : {}),
+          ...(typeof query.primaryExchange === 'string'
+            ? { primaryExchange: query.primaryExchange }
+            : {}),
+          ...(typeof query.currency === 'string' ? { currency: query.currency } : {}),
+          ...(typeof query.assetClass === 'string' ? { assetClass: query.assetClass } : {}),
+        }),
+      ),
+    )
+  })
+
   app.get('/api/v1/ibkr/depth', authenticated, async (request) => {
     const { ibkr } = options
     const query = request.query as Record<string, string | undefined>

@@ -20,6 +20,118 @@ No historical source-only fix is asserted as an outstanding packaged blocker her
 Reproduce issues against the installed package before adding them. Host limitations
 and release qualification gaps are tracked in [limitations](limitations.md).
 
+## Options Order price shortcuts clip in narrow fields (2026-10-07)
+
+- **Installed baseline / scope:** The terminal's installed `@tradescript/pro`
+  alias remains version `0.1.34`. The diagnosis below uses the user's desktop
+  screenshot and current external-source SDK implementation; packaged behavior
+  and the selected contract's live quotes were not independently reproduced.
+- **Reproduction:** In a narrow Options Order widget, the Limit Price input
+  shows `1.93`, while the three price shortcuts below it show cropped numbers
+  resembling `.920`, `.925`, and `.930`.
+- **Verified source cause:** The shortcuts are Bid, Mid, and Ask. They call
+  the shared price formatter without explicit precision, which uses four decimal
+  places for amounts below 10. Three equal-width buttons share the field's
+  width; their centered content has hidden overflow. Labels such as `1.9200`,
+  `1.9250`, and `1.9300` can therefore lose digits at both edges. The numeric
+  input uses a separate control and the selected contract's price step.
+- **Expected / status:** Complete shortcut prices must remain readable at
+  supported widget widths, preserving midpoint precision and the broker's price
+  step. No order or pricing behavior was changed. This is a recorded SDK display
+  defect; no source fix or published fixed version is asserted.
+
+## Compact symbol picker compresses filter rows (2026-10-07)
+
+- **Installed baseline:** `@tradescript/pro` alias of
+  `@tradescript/pro-developer-console-free`, version `0.1.34`. The compact
+  picker described below is an unpublished external-source SDK feature;
+  this is not a reproduction against the installed package.
+- **Reproduction:** Open the compact toolbar symbol search with an empty
+  query and enough recent/default symbols to fill the popup. The exchange
+  and asset-type labels extend below their capsule backgrounds and overlap
+  the following row. The full search dialog does not show this compression.
+- **Verified cause:** In the rendered source-mode terminal, the popup reaches
+  its 560px height limit. Its filter rows allow vertical flex shrinking;
+  27px filter buttons shrink to 17.8125px while retaining 11px line height
+  and 7px padding above and below. The text extends beyond the button's
+  lower edge. The overflowing symbol list still occupies 452.375px.
+- **Upstream source fix:** The SDK's compact picker preserves the search,
+  exchange, spread-operator and asset-type rows' intrinsic heights. The symbol
+  list absorbs the height constraint and scrolls within the remaining space.
+  No consumer CSS overrides are added.
+- **Verification / status:** All 26 picker tests pass. Verified in the native
+  development terminal and measured in its browser rendering with the same
+  source-mode SDK: the popup remains 560px tall, filter buttons remain 27px
+  tall, and the 680px symbol list scrolls in a 433px viewport without changing
+  those button heights. SDK type checking passes. The full SDK run passes
+  8,807 of 8,810 tests; its three timing-sensitive failures pass when their
+  two complete files are rerun (23 tests). Website checks pass all 541 unit
+  and 34 script tests, and deployment checks pass all 442 tests. The consumer's
+  broad check still stops at four existing formatting errors. The fix is local
+  SDK source, unpublished.
+
+## Toolbar symbol picker, listing groups and search sparklines (2026-10-07)
+
+- **Installed package:** `@tradescript/pro` alias of
+  `@tradescript/pro-developer-console-free`, version `0.1.34`.
+- **Affected API / reproduction:** The chart toolbar's symbol control is a text
+  box with a result dropdown. One listing per row, no prices, no way to see a
+  security's other venues, and no filter presets. `MarketDataFeed` has no method
+  for recent-price lines.
+- **Expected / upstream source support:** The toolbar shows the current symbol
+  with its listing venue. The desktop control is 112px wide. Both lines are
+  centered, with an 8px venue label above the 13px ticker. Hovering opens a
+  compact search you can type into at
+  once; clicking opens the full symbol-search dialog (recents, favorites, saved
+  views, exchange/quote/product refinement, compare-on-chart modes, an asset
+  list and the selected asset's markets). Rows sharing a `group.key` form one
+  asset with several markets. Prices come from `getQuotes`. The new optional
+  `MarketDataFeed.getSparklines(SparklineRequest): Promise<SparklineSeries[]>`
+  (flag `supportsSparklines`) draws row lines. `features.symbolSearch.savedViews`
+  (`SymbolSearchSavedView[]`) supplies the presets, and
+  `features.symbolSearch.defaultSymbols` lists exact rows before the user types
+  (after recents and favourites, by asset type, following the active tab). Both
+  search fields show the current symbol as a chip. `openSymbolSearch`, `mod+k`
+  and type-to-search open the dialog.
+- **Toolbar alignment and width verification (2026-10-07):** The centered,
+  smaller venue label and narrower button are verified in the native development
+  terminal. Browser measurements confirm a 112px button, both text centers
+  within 0.01px of its center, 8px/13px font sizes, and labels fitting without
+  truncation. The button still opens the search dialog. All 82 picker and toolbar
+  tests pass. The full SDK run passes 8,763 tests and skips 47 after the package
+  boundary file's setup times out; all 47 pass when that complete file is rerun.
+  SDK type checking, 541 website unit tests, 34 website script tests, and 442
+  deployment tests pass.
+  This is local external-source SDK support, unpublished.
+- **Consumer application:** IBKR sends `issuerId` only for bonds (stock rows
+  carry an empty value on API server 193), so the gateway groups stock search
+  rows by the ISIN in each listing's contract details: AAPL on NASDAQ, MEXI and
+  EBS (CHF and USD lines) share `US0378331005`, while the TSE CDR has its own
+  ISIN and stays separate. ISINs are cached per conId for a day, looked up six
+  at a time, and a failed lookup leaves the row ungrouped. New
+  `GET /api/v1/ibkr/sparklines` returns one trading day of five-minute closes per
+  symbol through the chart's own contract qualification and history request,
+  cached five minutes, three requests at a time, omitting symbols IBKR cannot
+  answer. The terminal feed forwards `group`, implements `getSparklines` with
+  the same per-identity batching as quotes, and the mock feed draws synthetic
+  lines. Picker presets follow the provider: IBKR passes three saved views and
+  a curated default list of its own search rows pinned by conId (nine US
+  stocks/ETFs, three IDEALPRO pairs, PAXOS BTC and ETH); mock mode passes its
+  fixtures.
+- **Verification:** New and affected SDK files pass **547** tests; the full SDK
+  run passes **8,775** of **8,784** (failures are in-flight Market Profile and
+  liquidity-heatmap work plus three authorization timeouts that pass alone).
+  SDK type checking passes apart from that in-flight heatmap work. Gateway
+  passes **734** of **740** (the six existing broker-runtime/connection-manager
+  failures); all **453** terminal tests pass; `npm run typecheck:source`
+  passes. Live Paper: the compact search groups AAPL into one asset with
+  "4 markets", the dialog lists the markets with live prices and IBKR
+  sparklines, and selecting a row updates Recent.
+- **Release status:** Local SDK source change, unpublished. Installed `0.1.34`
+  declarations reject `getSparklines`, `SparklineRequest`/`SparklineSeries`,
+  `SymbolSearchSavedView`, `savedViews` and `defaultSymbols`, so `npm run check` and `npm run build` stop at that public API
+  boundary until a published SDK package includes them.
+
 ## Account heading visibility and title-bar market status (2026-10-04)
 
 - **Installed package:** `@tradescript/pro` alias of
@@ -963,3 +1075,238 @@ verification gates; source fixes alone do not close their release qualification.
   load and passes alone. The live paper MSFT chart shows the tag, `6 @ $526.64`
   and a green `EUR +12.25` chip.
 - **Release status:** Local SDK source change, unpublished; no API change.
+
+## Option chart selection hides its underlying option chain (2026-10-07)
+
+- **Reproduction:** Load the exact QQQ October 8, 2026 758 call chart from a
+  paper position. The chain receives the option's contract ID and shows
+  `Option chain is not available for this instrument.` Its reference price is
+  also the option premium instead of QQQ's underlying price. The gateway
+  rejects that request with `Options require a stock, index or futures underlying.`
+- **Cause:** The Terminal's resolved option descriptor did not carry its exact
+  underlying identity. SDK chart startup displayed the resolved symbol while
+  keeping the original descriptor in the chart controller. The chart's link
+  lifecycle and shared symbol group also discarded enriched instrument facts
+  when the canonical contract ID stayed the same. Finally, the terminal SDK
+  composition passed the active option and its premium to the chain.
+- **Source correction:** `OptionInstrumentDetails.underlyingSymbolInfo` carries
+  the provider-resolved underlying descriptor. The gateway qualifies IBKR's
+  `underConId` through contract details and preserves the exact underlying
+  contract, asset class, exchange and currency; the datafeed transports those
+  typed facts. SDK startup adopts its resolved descriptor into controller state,
+  symbol links publish enriched instrument facts, and the terminal's option
+  surfaces use the declared underlying and its own reference quote. No option
+  ticker parsing, stock defaults, or consumer-side casts are used.
+- **Regression coverage:** Full gateway option-underlying, terminal mapping,
+  SDK symbol-link, widget lifecycle, chart-surface lifecycle and terminal
+  composition test files cover the relationship and propagation boundaries.
+- **Verification:** Gateway and Terminal mapping regressions pass **4/4**;
+  the focused SDK files pass **103/103**, and the complete SDK suite passes
+  **8,814/8,814** with Node's experimental web storage disabled. SDK type
+  checking and Terminal source-mode type checking pass. Read-only requests
+  through the running paper Terminal resolve the QQQ October 8, 2026 758 call
+  to IBKR's exact QQQ underlying and return a chain with **32 expirations**.
+  The native paper Terminal renders the chain, including strike **758**, with
+  that option selected. Repository-wide formatting/check and packaged build
+  gates still fail on other current changes; the gateway suite has six failures
+  in broker-runtime/connection-manager tests, while all 474 Terminal tests pass.
+- **Release status:** Local source changes in the Terminal and SDK checkout.
+  The installed `0.1.34` package has not been replaced or published.
+
+## Option selection opens a docked contract chart (2026-10-07)
+
+- **Requested behavior:** Clicking a bid or ask in the option chain opens the
+  selected contract's chart beside the chain in the central area. Order Entry
+  and Options Order retain their column on the far right. Later selections
+  reuse the chart panel.
+- **SDK source API:** `BrokerTradingTerminalSurfaceOptions.optionChartOptions`
+  accepts the existing typed `OptionContractChartBridge`, an optional initial
+  width fraction (0.4 by default), an explicit pixel-width override, chart
+  options and labels. The terminal registers a normal `contract-chart` widget,
+  adds it to the right of the selected option-chain group and
+  activates the existing chart panel on later selections. The panel supports
+  normal docking, resizing and closing. Its title identifies the underlying,
+  expiry, strike and call/put. Pin holds its current contract; Unpin follows
+  the latest selection. A separate symbol controller and explicit chart
+  provider preserve the primary chart and chain's symbol context. Cancelled
+  mapping results cannot replace a more recent contract, and qualification
+  failures appear in the panel. The SDK reference/export inventory was
+  regenerated through its generator.
+- **Terminal integration:** `createOptionChartBridge` qualifies each selection
+  through the adapter's `resolveOptionContract`, then carries the returned
+  broker contract ID and typed instrument facts into its chart descriptor.
+  IBKR uses the qualified `IBKR:<conId>` identity; the simulator uses its own
+  explicit synthetic identity. Display text never determines contract identity.
+  The existing option-ticket activation remains in place. No order is submitted
+  by these chart selection controls.
+- **Verification:** The affected terminal composition and contract-chart SDK
+  files pass **47/47** tests, including panel reuse, close/reopen, independent
+  main symbol, Pin/Unpin, stale async mapping and failure recovery. The exact
+  broker-to-chart mapping file passes **3/3**; all **477** Terminal tests and
+  **8,819** SDK tests passed for the initial feature. SDK type checking and Terminal source-mode type
+  checking pass. In the native paper Terminal, selecting the QQQ October 8,
+  2026 758 call renders its actual contract candles beside the visible chain;
+  selecting 757 while pinned retains 758, and Unpin loads 757's candles in the
+  same panel. These checks used read-only contract/market-data operations.
+- **Remaining gates:** The isolated synthetic browser regression is blocked
+  before mounting the workstation by SDK browser authorization. Repository
+  `check` remains blocked by existing formatting failures; gateway tests retain
+  six existing broker-runtime/connection-manager failures. The packaged build
+  still encounters existing source/package API mismatches with installed
+  `0.1.34`.
+- **Release status:** Implemented in the local Terminal and SDK source
+  checkouts. The installed SDK package is unchanged and this API is unpublished.
+
+### Contract chart opens too narrow (2026-10-07)
+
+- **Cause:** The workstation's responsive sizing still allocated the entire
+  central width to the main chart/chain group. That resize squeezed the new
+  contract chart even when the SDK initially created a correctly sized split.
+- **Correction:** The SDK splits the selected chain group using the typed
+  `initialWidthFraction` option, defaulting to `0.4`; explicit pixel widths
+  retain precedence. The workstation's responsive sizing uses that same
+  fraction to share the central analysis area between the chain and contract
+  chart, while retaining the order rail on the far right. Floating or closed
+  contract charts do not consume the central area's width. Later selections
+  reuse the panel without resetting its manually resized width.
+- **Evidence:** The complete layout, terminal composition and contract-chart
+  files pass **80** tests, including a nested layout with a watchlist, portfolio row and order
+  column. The workstation sizing file passes **6** tests for activation,
+  two desktop widths and closed/floating charts. All **481** Terminal tests
+  and **8,822** SDK tests pass. SDK type checking passes. In the connected
+  paper browser terminal at a 1,280-pixel workspace width, the chain measures
+  426.66 pixels, the contract chart 284.66 pixels (40.02% of their shared area)
+  and the right-hand order ticket 288 pixels. The synthetic browser regression
+  now asserts the shared width fraction and ticket placement; its isolated
+  authorization blocker remains. The native paper terminal also displays the
+  exact QQQ October 8, 2026 758 call beside the selected chain, at approximately
+  40% of their shared width, with Options Order in the existing right-hand rail.
+  Its historical bars show a latest close of 2.16 and volume 1,250; option quotes
+  were stale during this after-hours check, so this is historical chart and
+  layout evidence rather than current option pricing evidence.
+  The normal repository check still stops on four existing formatting errors;
+  packaged compilation retains installed/source SDK API mismatches.
+  The additional source-mode check was stopped during declaration bundling
+  after more than 12 minutes; no completed result is claimed for that repeat.
+
+### Closing the contract chart widens Markets and Fundamentals (2026-10-08)
+
+- **Cause:** The SDK's close driver passed group removal directly to Dockview,
+  whose removal distributes the remaining split evenly. In the workstation's
+  nested top row, this enlarged the Markets/Fundamentals column instead of
+  returning the contract chart's width to the neighboring chain group.
+- **Correction:** SDK panel and group closes now use the actual serialized
+  split to retain other siblings' current dimensions and give the removed
+  pane's space to its adjacent sibling. The sizing uses the SDK's shared gap
+  value and identifies a group spanning the requested dimension through
+  orthogonal splits. Existing user widths are retained; no consumer CSS,
+  name-based layout routing, or reset to initial widths was added.
+- **Evidence:** All **37** layout functional tests pass, including panel and
+  group closes with manually resized Markets/Fundamentals and another nested
+  column. In the connected paper browser terminal, closing the exact NVDA
+  October 9, 2026 235 call chart expands the chain from **428.66** to **723**
+  pixels; the left column stays at approximately **251** pixels and the order
+  rail at **290** pixels. Native desktop verification opens and closes the
+  QQQ October 9, 2026 753 call chart, retaining the left column and expanding
+  the central chain. The public crop comparison is saved at
+  `.local/artifacts/option-chart-close-layout.jpg`. These were contract/market
+  data and UI operations; no broker orders were submitted.
+- **Regression gates:** SDK type checking passes. Website tests pass **541**
+  unit tests and **34** script tests. All **442** deployment-script tests pass
+  in the serial Node 24 rerun. The Node 24 SDK sweep passes **8,828** tests with
+  one unrelated trading-session facade import timeout; the complete affected
+  authorization file passes all **8** tests on its separate Node 24 rerun.
+  The normal repository check still stops at
+  four existing formatting errors, and packaged build/E2E type checking retain
+  the installed SDK API mismatches. The isolated mock selection test remains
+  blocked before workstation mount by unavailable browser authorization;
+  its new close/reopen assertions are not claimed as passing.
+- **Release status:** Local SDK source correction, used by the running
+  development workstation. The installed SDK package is unchanged.
+
+## Rounded workspace tabs (2026-10-07)
+
+- **Affected surface / reproduction:** Installed SDK `0.1.34` renders workspace
+  tabs as full-height rectangles with keyboard setup buttons. Layout slots style
+  the inner tab content, but do not expose an inset pill appearance or a leading
+  indicator. The terminal also forced square tab corners and an underline.
+- **SDK change:** Added optional typed `tabAppearance: 'standard' | 'pill'` and
+  `tabIndicatorColor` layout options. Pill tabs use a rounded, vertically inset
+  selected background, transparent inactive tabs, and a decorative leading dot.
+  The dot defaults to the theme accent and has a `tabIndicator` styling slot.
+  The composed terminal forwards these options and `showHotkeySetupAction`;
+  hiding the setup buttons retains registered keyboard actions. Standard tabs
+  remain the SDK default.
+- **Terminal integration:** Selects pill tabs with blue dots and hides the
+  keyboard buttons. Removed the existing tab chrome overrides so the SDK owns
+  the appearance. Close buttons remain visible on active tabs and on hover or
+  keyboard focus.
+- **Focused evidence:** All three affected SDK files, including the public
+  styling-slot coverage gate, pass **84 tests**;
+  Terminal unit tests pass **477/477**. The complete workspace-tab browser file
+  passes **2/2**, checking dark and light themes, rounded/inset geometry,
+  centered blue indicators, switching, and closing. The running native paper
+  terminal renders the pill tabs after a view reload. No broker mutations were
+  performed.
+- **Compatibility checks:** SDK type checking and Terminal source-mode type
+  checking pass. The complete SDK suite passes **8,822/8,822** with
+  `NODE_OPTIONS=--no-experimental-webstorage` so Node 26's global storage does
+  not mask the browser test environment's storage. Website unit and script
+  gates pass; one deployment-script timeout passed on a whole-file retry.
+  The normal repository check still stops on four existing
+  formatting errors; packaged compilation uses the unchanged installed SDK
+  and cannot yet accept the new tab options.
+- **Release status:** Implemented in the local SDK and terminal source
+  checkouts. The installed SDK package is unchanged; packaged compilation needs
+  an SDK release containing these new options and the existing source-only APIs.
+
+## Workspace header actions and detached windows (2026-10-07)
+
+- **Baseline / requested behavior:** Installed SDK `0.1.34` remains unchanged.
+  The current source SDK owns the group-header buttons; its maximize icon used
+  diagonal arrows, and its close icon was small. The terminal did not enable
+  the SDK's existing `showPopoutAction` option, and the native host did not
+  create opener-connected windows for detached groups.
+- **SDK source change:** Uses corner-outline maximize/restore icons, a thin
+  close icon, and an open-in-window icon while retaining the plus button.
+  All four icons use the plus icon's 14px size and 2px SVG stroke, with consistent
+  22px button targets. Detached groups carry the SDK layout's
+  presentation root and registered theme into their document; Dockview's theme
+  discovery previously omitted this SDK custom theme. Theme updates propagate
+  to open detached windows. Anchored menus now mount, position, follow viewport
+  changes, and dismiss in their anchor's document, so the plus menu stays with
+  its detached group.
+- **Size follow-up verification:** Rendered measurements confirm 14×14px SVGs
+  in 22×22px buttons for all four actions, identical SVG stroke width, and zero
+  horizontal/vertical icon-center offset. The plus glyph is unchanged. Both
+  complete affected SDK files pass **77 tests**, and the complete header browser
+  file passes **2/2** in dark and light appearance. The full SDK suite passes
+  **8,825/8,825** after the size adjustment. SDK type checking, all **541 website
+  unit and 34 website script tests**, and all **442 deployment-script tests**
+  also pass on this run.
+- **Terminal / native integration:** Enables the public popout option with
+  `/workspace-popout.html`, an empty same-origin page that does not initialize
+  a second terminal or broker connection. The desktop host creates windows
+  using the opener's webview configuration and restricts navigation to that
+  exact page on the running terminal origin. Closing a detached window returns
+  its group through the SDK's existing layout lifecycle.
+- **Qualification:** Local source changes only; packaged distribution requires
+  an SDK release. All four affected SDK test files pass **91 tests**. Both full
+  browser files pass **4/4**, checking dark/light tabs and action behavior,
+  retained panel content, detached styling, the plus menu in its own window,
+  outside-click dismissal, and return on window close. No broker mutations are
+  performed. Native Rust tests pass **18/18** and the development binary build
+  passes; desktop tests pass **9 unit and 15 script tests**, and the affected
+  terminal file passes **15/15**. SDK type checking passes. Terminal and E2E
+  type checking pass using existing generated source-SDK declarations; the
+  normal declaration-regeneration attempt could not acquire the build lock
+  while another SDK build was active.
+  The isolated complete SDK suite passes **8,825/8,825** across **894 files**
+  with `NODE_OPTIONS=--no-experimental-webstorage`. Website checks pass all
+  **541 unit and 34 script tests** after a whole-file timeout retry, and all
+  **442 deployment-script tests** pass including a whole-file timeout retry.
+  The consumer's normal check still stops at four pre-existing formatting
+  errors, and packaged compilation remains blocked by the installed SDK's
+  missing source-mode APIs.
+  The current native process must reopen before its new-window handler can be
+  exercised; that step awaits the user's explicit approval.

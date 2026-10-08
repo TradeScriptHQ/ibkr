@@ -27,7 +27,9 @@ createRoot(root).render(
     <AppearanceProvider store={appearance}>
       <AppNotificationsProvider>
         <DesktopChrome>
-          <ApplicationSetup>{(setup) => <App setup={setup} />}</ApplicationSetup>
+          <ApplicationSetup>
+            {(setup, settings) => <App setup={setup} settings={settings} />}
+          </ApplicationSetup>
         </DesktopChrome>
       </AppNotificationsProvider>
     </AppearanceProvider>

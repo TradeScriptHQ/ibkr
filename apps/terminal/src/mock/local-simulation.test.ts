@@ -170,6 +170,14 @@ describe('local trading simulation', () => {
     expect(state.executions).toEqual([])
   })
 
+  it('draws a synthetic search-row sparkline ending at the fixture price', async () => {
+    const { datafeed } = createLocalSimulation({ now: () => NOW })
+    const lines = await datafeed.getSparklines?.({ symbols: [AAPL] })
+    expect(lines?.[0]?.symbol).toBe(AAPL)
+    expect(lines?.[0]?.values).toHaveLength(24)
+    expect(lines?.[0]?.values.at(-1)).toBe(200)
+  })
+
   it('publishes deterministic quotes, bars, depth, tape, and option contracts', async () => {
     const { datafeed } = createLocalSimulation({ now: () => NOW })
     const symbol = await datafeed.resolveSymbol?.('AAPL')

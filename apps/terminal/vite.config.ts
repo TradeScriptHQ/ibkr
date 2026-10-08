@@ -5,6 +5,7 @@ import path from 'node:path'
 import react from '@vitejs/plugin-react'
 import { defineConfig, loadEnv, type Plugin, searchForWorkspaceRoot } from 'vite'
 import { APP_NAME } from './src/branding.js'
+import { logoDevPublishableKey } from './src/ibkr/symbol-logos.js'
 import { LEGAL_DOCUMENTS } from './src/legal-documents.js'
 
 function bundledLegalNoticesPlugin(legalDirectory: string): Plugin {
@@ -82,6 +83,11 @@ export default defineConfig(({ command, mode }) => {
     process.env.TERMINAL_ENV_FILE ? path.dirname(process.env.TERMINAL_ENV_FILE) : repositoryRoot,
     '',
   )
+  // A public branding key can be shared with isolated paper development without
+  // loading the root broker configuration into that workstation.
+  const logoKey =
+    environment.VITE_LOGO_DEV_PUBLISHABLE_KEY ??
+    loadEnv(mode, repositoryRoot, 'VITE_LOGO_DEV_PUBLISHABLE_KEY').VITE_LOGO_DEV_PUBLISHABLE_KEY
   const configuredSourceRoot = environment.TRADESCRIPT_SDK_SOURCE?.trim()
   const sourceSdkRoot =
     command === 'serve' && configuredSourceRoot !== undefined && configuredSourceRoot.length > 0
@@ -176,6 +182,9 @@ export default defineConfig(({ command, mode }) => {
       ),
     ],
     define: {
+      'import.meta.env.VITE_LOGO_DEV_PUBLISHABLE_KEY': JSON.stringify(
+        logoDevPublishableKey(logoKey),
+      ),
       'import.meta.env.VITE_TRADESCRIPT_SDK_SOURCE_MODE': JSON.stringify(
         sourceSdkRoot !== undefined,
       ),

@@ -271,6 +271,46 @@ it('reports typed market-data causes for chart history and a competing live sess
   expect(health.json()).toMatchObject({ connectionStatus: 'connected', competingLiveSession: true })
 })
 
+it('passes each requested sparkline symbol with the shared contract metadata to IBKR', async () => {
+  const { BrokerStateStore } = await import('../src/ibkr/state-store.js')
+  const brokerStore = new BrokerStateStore()
+  brokerStore.setConnectionStatus('connected')
+  const getSparklines = vi.fn(async (symbols: Array<{ symbol: string }>) =>
+    symbols.map((symbol) => ({ symbol, values: [1, 2] })),
+  )
+  const app = await createGatewayServer({
+    config: loadGatewayConfig({ NODE_ENV: 'test' }),
+    ibkr: { getSparklines } as unknown as import('../src/ibkr/ibkr-service.js').IbkrService,
+    brokerStore,
+    proxyCapability: browserHeaders['x-terminal-proxy-capability'],
+    sessions: new SessionStore(),
+    tickets: new WebSocketTicketStore(),
+    events: new EventStream(),
+    getStatus: status,
+  })
+  apps.push(app)
+  const headers = await authenticatedHeaders(app)
+  const response = await app.inject({
+    path: '/api/v1/ibkr/sparklines?symbol=AAPL&symbol=MSFT&exchange=SMART&primaryExchange=NASDAQ&currency=USD&assetClass=stock',
+    headers,
+  })
+  expect(response.statusCode).toBe(200)
+  const metadata = {
+    exchange: 'SMART',
+    primaryExchange: 'NASDAQ',
+    currency: 'USD',
+    assetClass: 'stock',
+  }
+  expect(getSparklines).toHaveBeenCalledWith([
+    { symbol: 'AAPL', ...metadata },
+    { symbol: 'MSFT', ...metadata },
+  ])
+  expect(response.json()).toEqual([
+    { symbol: { symbol: 'AAPL', ...metadata }, values: [1, 2] },
+    { symbol: { symbol: 'MSFT', ...metadata }, values: [1, 2] },
+  ])
+})
+
 it('rechecks agent authority inside execution when it changes after the early request check', async () => {
   const { ConnectionManager } = await import('../src/connections/connection-manager.js')
   const { BrokerStateStore } = await import('../src/ibkr/state-store.js')

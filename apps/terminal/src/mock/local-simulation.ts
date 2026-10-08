@@ -103,26 +103,32 @@ export function createLocalSimulation(options: LocalSimulationOptions = {}): Loc
   }
 }
 
+function mockSymbol(ticker: string): SdkSymbolInfo {
+  const normalized = ticker.toUpperCase()
+  return {
+    ticker: normalized,
+    canonicalSymbol: `mock:${normalized}`,
+    brokerSymbol: normalized,
+    name: normalized === 'AAPL' ? 'APPLE INC' : normalized,
+    exchange: 'SMART',
+    listedExchange: normalized === 'SPY' ? 'ARCA' : 'NASDAQ',
+    currency: 'USD',
+    type: 'stock',
+    provider: MOCK_PROVIDER,
+  }
+}
+
+/** Every synthetic fixture, as the rows the mock feed's search returns. */
+export const MOCK_DEFAULT_SYMBOLS: readonly SdkSymbolInfo[] =
+  Object.keys(BASE_PRICES).map(mockSymbol)
+
 function createMockMarketDatafeed(
   now: () => number,
   optionContracts: Map<string, TradingOptionContract>,
   overrides: Map<string, SyntheticQuoteUpdate>,
 ): MarketDataFeed {
-  const resolve = (selection: string | SdkSymbolInfo): SdkSymbolInfo => {
-    if (typeof selection !== 'string') return selection
-    const ticker = selection.toUpperCase()
-    return {
-      ticker,
-      canonicalSymbol: `mock:${ticker}`,
-      brokerSymbol: ticker,
-      name: ticker === 'AAPL' ? 'APPLE INC' : ticker,
-      exchange: 'SMART',
-      listedExchange: ticker === 'SPY' ? 'ARCA' : 'NASDAQ',
-      currency: 'USD',
-      type: 'stock',
-      provider: MOCK_PROVIDER,
-    }
-  }
+  const resolve = (selection: string | SdkSymbolInfo): SdkSymbolInfo =>
+    typeof selection === 'string' ? mockSymbol(selection) : selection
   const priceFor = (selection: string | SdkSymbolInfo) =>
     overrides.get(instrumentKey(resolve(selection)))?.last ??
     BASE_PRICES[typeof selection === 'string' ? selection.toUpperCase() : selection.ticker] ??
@@ -325,6 +331,18 @@ function createMockMarketDatafeed(
     },
     async getQuotes(request) {
       return request.symbols.map(quoteFor)
+    },
+    async getSparklines(request) {
+      // Synthetic day line ending at the fixture's current price.
+      return request.symbols.map((symbol) => {
+        const last = priceFor(symbol)
+        return {
+          symbol,
+          values: Array.from({ length: 24 }, (_, index) =>
+            round(last - 1.5 + index * (1.5 / 23) + Math.sin(index / 2.5) * 0.4 * (1 - index / 23)),
+          ),
+        }
+      })
     },
     subscribeQuotes(subscription, callback) {
       const emit = () => callback(subscription.symbols.map(quoteFor))

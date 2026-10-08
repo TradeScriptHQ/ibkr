@@ -73,7 +73,7 @@ for (const viewportWidth of [1_200, 1_728]) {
       await page.setViewportSize({ width: viewportWidth, height: 1_000 })
       await page.goto('/', { waitUntil: 'domcontentloaded' })
       await expect(page.getByText('Simulated session', { exact: true })).toBeVisible()
-      await expect(page.getByRole('button', { name: 'Chart data', exact: true })).toBeEnabled()
+      await expect(page.locator('.terminal-frame:not(:has(.terminal-overlay))')).toBeVisible()
       expect(sourceWatchlistLoaded, 'The regression must render the actual source SDK').toBe(true)
 
       const watchlist = page.getByRole('tabpanel').filter({

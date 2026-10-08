@@ -19,10 +19,10 @@
   --app-accent: #c4c4c4;
   --app-focus: #b3b3b3;
   --app-simulation: #c0b2ef;
-  --app-success: #7bd5ad;
-  --app-success-border: rgb(123 213 173 / 27%);
-  --app-success-background: rgb(123 213 173 / 8%);
-  --app-success-glow: rgb(123 213 173 / 22%);
+  --app-success: #24ea85;
+  --app-success-border: rgb(36 234 133 / 27%);
+  --app-success-background: rgb(36 234 133 / 8%);
+  --app-success-glow: rgb(36 234 133 / 22%);
   --app-warning: #e8c27c;
   --app-warning-border: rgb(232 194 124 / 30%);
   --app-warning-background: rgb(232 194 124 / 9%);
@@ -50,8 +50,6 @@
   --app-accent-glow: rgb(196 196 196 / 25%);
   --app-selection: rgb(255 255 255 / 14%);
   --app-selection-text: #fff;
-  --app-tab-selected: #454950;
-  --app-tab-unfocused: #393d43;
   --app-window-close-hover: #bf3945;
   --app-glass-filter: blur(28px) saturate(1.15);
   --app-glass-shine: rgb(255 255 255 / 5%);
@@ -77,10 +75,10 @@
   --app-accent: #626262;
   --app-focus: #737373;
   --app-simulation: #7052a8;
-  --app-success: #19714d;
-  --app-success-border: rgb(25 113 77 / 26%);
-  --app-success-background: rgb(25 113 77 / 6%);
-  --app-success-glow: rgb(25 113 77 / 14%);
+  --app-success: #087b40;
+  --app-success-border: rgb(36 234 133 / 26%);
+  --app-success-background: rgb(36 234 133 / 6%);
+  --app-success-glow: rgb(36 234 133 / 14%);
   --app-warning: #906112;
   --app-warning-border: rgb(144 97 18 / 26%);
   --app-warning-background: rgb(176 130 42 / 8%);
@@ -108,8 +106,6 @@
   --app-accent-glow: rgb(98 98 98 / 17%);
   --app-selection: rgb(0 0 0 / 8%);
   --app-selection-text: #242424;
-  --app-tab-selected: #d8dce2;
-  --app-tab-unfocused: #e2e5e9;
   --app-window-close-hover: #bf3945;
   --app-glass-filter: blur(28px) saturate(1.15);
   --app-glass-shine: rgb(255 255 255 / 50%);
@@ -881,12 +877,7 @@ button {
 
 /* Stable TradeScript layout hooks: modernize the dock chrome without coupling to generated styles. */
 .terminal-host .ts-widget-layout-theme {
-  --dv-activegroup-visiblepanel-tab-background-color: var(--app-tab-selected);
-  --dv-inactivegroup-visiblepanel-tab-background-color: var(--app-tab-unfocused);
-  --dv-tabs-and-actions-container-height: 34px;
   --dv-border-radius: 12px;
-  --dv-tab-border-radius: 8px;
-  --dv-tab-font-size: 11px;
 }
 
 .terminal-host .ts-widget-layout-theme .dv-groupview {
@@ -895,31 +886,6 @@ button {
     0 14px 34px var(--app-shadow-soft),
     inset 0 1px 0 var(--app-highlight);
   backdrop-filter: blur(22px) saturate(1.15);
-}
-
-.terminal-host .ts-widget-layout-theme .dv-tab {
-  position: relative;
-  margin: 0;
-  border-top: 0;
-  border-right: 0;
-  border-bottom: 0;
-  border-radius: 0;
-  box-shadow: none;
-}
-
-.terminal-host .ts-widget-layout-theme .dv-tab.dv-active-tab::before {
-  content: none;
-}
-
-.terminal-host .ts-widget-layout-theme .dv-tab.dv-active-tab::after {
-  position: absolute;
-  inset: auto 0 0;
-  width: auto;
-  height: 1px;
-  border-radius: 999px;
-  background: var(--app-border);
-  box-shadow: none;
-  content: "";
 }
 
 .terminal-host .ts-widget-layout-theme .dv-split-view-container > .dv-view-container {

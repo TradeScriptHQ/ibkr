@@ -28,7 +28,16 @@ function glassTheme(appearance: Appearance): ChartTheme {
     hoverBorder: '#ededed',
     hoverText: '#111111',
   }
-  const positive = light ? '#17804b' : '#57d194'
+  const positive = '#24ea85'
+  const positiveText = light ? '#087b40' : positive
+  const positiveButton = {
+    background: positive,
+    border: positive,
+    text: '#072316',
+    hoverBackground: '#20d67a',
+    hoverBorder: '#20d67a',
+    hoverText: '#072316',
+  }
   const negative = light ? '#c23e46' : '#fb7c85'
 
   return {
@@ -149,9 +158,9 @@ function glassTheme(appearance: Appearance): ChartTheme {
       semantic: {
         accent,
         positive,
-        positiveBackground: light ? 'rgba(23, 128, 75, 0.08)' : 'rgba(87, 209, 148, 0.1)',
-        positiveText: positive,
-        positiveOnText: light ? '#ffffff' : '#072316',
+        positiveBackground: light ? 'rgba(36, 234, 133, 0.08)' : 'rgba(36, 234, 133, 0.1)',
+        positiveText,
+        positiveOnText: '#072316',
         negative,
         negativeBackground: light ? 'rgba(194, 62, 70, 0.08)' : 'rgba(251, 124, 133, 0.1)',
         negativeBorder: light ? 'rgba(194, 62, 70, 0.24)' : 'rgba(251, 124, 133, 0.28)',
@@ -161,10 +170,10 @@ function glassTheme(appearance: Appearance): ChartTheme {
       },
       depth: {
         bid: positive,
-        bidText: positive,
-        bidFill: light ? 'rgba(23, 128, 75, 0.075)' : 'rgba(87, 209, 148, 0.08)',
-        bidOrderBackground: light ? 'rgba(23, 128, 75, 0.13)' : 'rgba(87, 209, 148, 0.16)',
-        bidOrderText: light ? '#116338' : '#a9efcc',
+        bidText: positiveText,
+        bidFill: light ? 'rgba(36, 234, 133, 0.075)' : 'rgba(36, 234, 133, 0.08)',
+        bidOrderBackground: light ? 'rgba(36, 234, 133, 0.13)' : 'rgba(36, 234, 133, 0.16)',
+        bidOrderText: positiveText,
         ask: negative,
         askText: negative,
         askFill: light ? 'rgba(194, 62, 70, 0.065)' : 'rgba(251, 124, 133, 0.08)',
@@ -181,10 +190,10 @@ function glassTheme(appearance: Appearance): ChartTheme {
         currentBackground: selectedBackground,
         currentBorder: selectedBorder,
         currentText: headingText,
-        upFlash: light ? 'rgba(23, 128, 75, 0.14)' : 'rgba(87, 209, 148, 0.2)',
+        upFlash: light ? 'rgba(36, 234, 133, 0.14)' : 'rgba(36, 234, 133, 0.2)',
         downFlash: light ? 'rgba(194, 62, 70, 0.14)' : 'rgba(251, 124, 133, 0.2)',
       },
-      buttonPositive: primaryButton,
+      buttonPositive: positiveButton,
       buttonNegative: secondaryButton,
       buttonHighlight: primaryButton,
       focus: {

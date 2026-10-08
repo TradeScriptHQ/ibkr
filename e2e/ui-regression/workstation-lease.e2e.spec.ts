@@ -134,7 +134,7 @@ test('the mounted packaged SDK accepts a different valid server-signed lease wit
     await page.goto('/')
     const terminal = page.getByRole('region', { name: 'IBKR Chart', exact: true })
     await expect(terminal).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Chart data', exact: true })).toBeEnabled()
+    await expect(page.locator('.terminal-frame:not(:has(.terminal-overlay))')).toBeVisible()
     const chartElement = await terminal.elementHandle()
     const mountElement = await page.locator('.terminal-host > div').elementHandle()
     expect(Boolean(chartElement && mountElement), 'The original packaged mount must exist').toBe(
@@ -170,7 +170,7 @@ test('the mounted packaged SDK accepts a different valid server-signed lease wit
     expect(await mountElement?.evaluate((element) => element.isConnected)).toBe(true)
     expect(await chartElement?.evaluate((element) => element.isConnected)).toBe(true)
     await expect(terminal).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Chart data', exact: true })).toBeEnabled()
+    await expect(page.locator('.terminal-frame:not(:has(.terminal-overlay))')).toBeVisible()
     await expect(page.getByText('Workstation unavailable', { exact: true })).toHaveCount(0)
   } finally {
     await page.unrouteAll({ behavior: 'wait' })

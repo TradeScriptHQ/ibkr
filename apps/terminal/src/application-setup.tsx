@@ -1,7 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { AppNotification } from './app-notifications.js'
-import { AppModal } from './appearance-ui.js'
 import { loadApplicationSetupStatus } from './application-setup-status.js'
 import { APP_LOGO, APP_NAME } from './branding.js'
 import { ConnectionSettingsButton } from './connection-settings.js'
@@ -17,6 +16,13 @@ import { bootstrapBrowserSession, CLIENT_HEADERS } from './terminal-session.js'
 import type { WorkstationSetupState } from './workstation-startup.js'
 
 const OPEN_SETTINGS = 'terminal:application-settings'
+
+export interface ApplicationSettingsState {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  content: ReactNode
+  busy: boolean
+}
 
 interface ApplicationSetupContentProps {
   status: SetupStatus | undefined
@@ -305,7 +311,7 @@ export function ApplicationSettingsButton() {
 export function ApplicationSetup({
   children,
 }: {
-  children: (setup: WorkstationSetupState) => ReactNode
+  children: (setup: WorkstationSetupState, settings: ApplicationSettingsState) => ReactNode
 }) {
   const [status, setStatus] = useState<SetupStatus>()
   const [error, setError] = useState('')
@@ -515,7 +521,14 @@ export function ApplicationSetup({
       void refresh()
     }
   }
-  if (mock) return children({ ready: true, stage: 'authorization', error: '', retry: refresh })
+  const settings = {
+    open: settingsOpen,
+    onOpenChange: changeSettingsOpen,
+    content: null,
+    busy,
+  }
+  if (mock)
+    return children({ ready: true, stage: 'authorization', error: '', retry: refresh }, settings)
   // A pending renewal keeps the workstation open; recovery starts only once it fails.
   const renewing = status !== undefined && sdkRenewalPending(status.sdk)
   const complete =
@@ -592,12 +605,15 @@ export function ApplicationSetup({
         )
       )}
       {checkingSetup || complete ? (
-        children({
-          ready: Boolean(complete),
-          stage: status === undefined ? 'setup' : 'authorization',
-          error: statusError,
-          retry: refresh,
-        })
+        children(
+          {
+            ready: Boolean(complete),
+            stage: status === undefined ? 'setup' : 'authorization',
+            error: statusError,
+            retry: refresh,
+          },
+          { ...settings, content },
+        )
       ) : (
         <>
           <DesktopSetupToolbar />
@@ -607,21 +623,6 @@ export function ApplicationSetup({
             </section>
           </main>
         </>
-      )}
-      {complete && (
-        <AppModal
-          open={settingsOpen}
-          onOpenChange={changeSettingsOpen}
-          title="Application settings"
-          width="540px"
-          boundary="viewport"
-          contentClassName="application-settings-body"
-          closeLabel="Close application settings"
-          headerDensity="compact"
-          closeDisabled={busy}
-        >
-          {content}
-        </AppModal>
       )}
     </>
   )

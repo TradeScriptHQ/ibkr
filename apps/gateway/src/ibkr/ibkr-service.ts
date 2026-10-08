@@ -8,8 +8,11 @@ import { OrderIdAllocator } from '../tws/order-id-allocator.js'
 import { resolveAccountCurrencyConversion } from './account-currency-conversion.js'
 import { AccountSubscriptions } from './account-subscriptions.js'
 import { isIbRequestWarning } from './broker-errors.js'
+import { mapWithConcurrency } from './concurrency.js'
 import type { BridgeConfig } from './config.js'
 import {
+  contractIsin,
+  denormalizeOptionExpiry,
   fromIbSymbol,
   nativeContractId,
   normalizeTicker,
@@ -57,10 +60,24 @@ import type {
   PaperOwnershipRecovery,
   PlaceOrderResult,
   PositionCloseOptions,
+  SymbolSearchGroup,
   SymbolSearchResult,
+  SymbolSparkline,
 } from './types.js'
 
 const CONTRACT_DETAILS_TIMEOUT_MS = 12000
+/** Five-minute closes retain intraday detail across one day's search-row line. */
+const SPARKLINE_DURATION = '1 D'
+const SPARKLINE_INTERVAL = '5m'
+const SPARKLINE_CACHE_MS = 5 * 60_000
+const SPARKLINE_CACHE_ENTRIES = 256
+/** Historical requests in flight at once for one sparkline batch. */
+const SPARKLINE_CONCURRENCY = 3
+/** A listing's ISIN does not change; keep it for a trading day. */
+const ISIN_CACHE_MS = 24 * 60 * 60_000
+const ISIN_CACHE_ENTRIES = 4096
+const ISIN_LOOKUP_TIMEOUT_MS = 4_000
+const ISIN_LOOKUP_CONCURRENCY = 6
 const OPTION_CHAIN_TIMEOUT_MS = 12000
 const SYMBOL_SEARCH_TIMEOUT_MS = 3000
 export class IbkrService {
@@ -495,7 +512,7 @@ export class IbkrService {
       !filter.assetClass || filter.assetClass === 'forex' ? searchForexSymbols(normalized) : []
     const exactForex = parseForexSymbol(normalized)
     const matches = await this.requestMatchingSymbols(normalized, SYMBOL_SEARCH_TIMEOUT_MS)
-    return uniqueMarketSymbols([
+    const symbols = uniqueMarketSymbols([
       ...forexMatches.filter(
         (symbol) => exactForex && symbol.ticker === `${exactForex.base}${exactForex.quote}`,
       ),
@@ -506,15 +523,74 @@ export class IbkrService {
             Boolean(symbol) && (!filter.assetClass || symbol?.type === filter.assetClass),
         ),
       ...forexMatches,
-    ])
-      .slice(0, safeLimit)
-      .map((symbol) => ({
+    ]).slice(0, safeLimit)
+    const groups = await this.listingGroups(symbols)
+    return symbols.map((symbol) => {
+      const group = symbol.canonicalSymbol ? groups.get(symbol.canonicalSymbol) : undefined
+      return {
         symbol,
         displayName: symbol.ticker,
         description:
           symbol.description ?? [symbol.exchange, symbol.currency].filter(Boolean).join(' '),
         provider: 'IBKR',
-      }))
+        ...(group ? { group } : {}),
+      }
+    })
+  }
+
+  private readonly isinCache = new Map<
+    number,
+    { expiresAt: number; value: Promise<string | undefined> }
+  >()
+
+  /**
+   * Groups stock rows that are one security on several venues or in several
+   * currencies: rows sharing the ISIN IBKR lists for them. The group takes its
+   * label from the first such row. A row whose ISIN IBKR does not supply, or
+   * whose lookup fails, stays ungrouped.
+   */
+  private async listingGroups(symbols: MarketSymbol[]): Promise<Map<string, SymbolSearchGroup>> {
+    const stocks = symbols.flatMap((symbol) => {
+      const conId =
+        symbol.type === 'stock' && symbol.canonicalSymbol
+          ? nativeContractId(symbol.canonicalSymbol)
+          : undefined
+      return conId === undefined || !symbol.canonicalSymbol
+        ? []
+        : [{ symbol, canonicalSymbol: symbol.canonicalSymbol, conId }]
+    })
+    const isins = await mapWithConcurrency(stocks, ISIN_LOOKUP_CONCURRENCY, ({ conId }) =>
+      this.listingIsin(conId),
+    )
+    const labels = new Map<string, string>()
+    const groups = new Map<string, SymbolSearchGroup>()
+    stocks.forEach(({ symbol, canonicalSymbol }, index) => {
+      const isin = isins[index]
+      if (!isin) return
+      symbol.isin = isin
+      if (!labels.has(isin)) labels.set(isin, symbol.ticker)
+      groups.set(canonicalSymbol, { key: `ISIN:${isin}`, label: labels.get(isin) })
+    })
+    return groups
+  }
+
+  private listingIsin(conId: number): Promise<string | undefined> {
+    const cached = this.isinCache.get(conId)
+    if (cached && cached.expiresAt > Date.now()) return cached.value
+    const value = this.requestContractDetails({ conId }, ISIN_LOOKUP_TIMEOUT_MS).then(
+      (details) => details.map(contractIsin).find((isin) => isin !== undefined),
+      () => {
+        // A failed lookup is not an answer about the listing; ask again next time.
+        if (this.isinCache.get(conId)?.value === value) this.isinCache.delete(conId)
+        return undefined
+      },
+    )
+    this.isinCache.set(conId, { value, expiresAt: Date.now() + ISIN_CACHE_MS })
+    if (this.isinCache.size > ISIN_CACHE_ENTRIES) {
+      const oldest = this.isinCache.keys().next().value
+      if (oldest !== undefined) this.isinCache.delete(oldest)
+    }
+    return value
   }
 
   async resolveSymbol(
@@ -564,8 +640,11 @@ export class IbkrService {
       )
         throw new RequestError(409, 'Resolved IBKR contract has a different instrument type')
       if (conId && (resolved.type === 'option' || resolved.type === 'futures-option')) {
-        const actualContract = details.find((detail) => detail.contract.conId === conId)?.contract
-        if (actualContract) this.qualifiedNativeOptions.set(conId, fromIbSymbol(actualContract))
+        const optionDetails = details.find((detail) => detail.contract.conId === conId)
+        if (optionDetails) {
+          this.qualifiedNativeOptions.set(conId, fromIbSymbol(optionDetails.contract))
+          return this.resolveOptionUnderlying(resolved, optionDetails)
+        }
       }
       return resolved
     }
@@ -598,6 +677,57 @@ export class IbkrService {
       throw new RequestError(404, `IBKR could not resolve symbol ${normalized}`)
     }
     return resolved
+  }
+
+  private async resolveOptionUnderlying(
+    symbol: MarketSymbol,
+    details: ContractDetails,
+  ): Promise<MarketSymbol> {
+    const underConId = positiveInteger(details.underConId)
+    const contract = details.contract
+    const strike = contract.strike
+    const expiration = denormalizeOptionExpiry(contract.lastTradeDateOrContractMonth ?? '')
+    const right = String(contract.right ?? '').toUpperCase()
+    if (
+      !underConId ||
+      !contract.conId ||
+      !contract.symbol ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(expiration) ||
+      typeof strike !== 'number' ||
+      !Number.isFinite(strike) ||
+      !['C', 'CALL', 'P', 'PUT'].includes(right)
+    )
+      return symbol
+
+    // IBKR declares the relationship by conId; the option's ticker and route
+    // cannot identify a stock listing, index, or exact futures expiry.
+    const underlyingDetails = await this.requestContractDetails({ conId: underConId })
+    const contracts = new Map(underlyingDetails.map((item) => [item.contract.conId, item]))
+    const underlyingDetailsEntry = contracts.get(underConId)
+    if (contracts.size !== 1 || !underlyingDetailsEntry) {
+      throw new RequestError(409, 'IBKR did not return one exact option underlying contract.')
+    }
+    const underlying = toMarketSymbol(underlyingDetailsEntry)
+    if (
+      !underlying ||
+      !['stock', 'index', 'futures'].includes(underlying.type ?? '') ||
+      (details.underSecType && underlyingDetailsEntry.contract.secType !== details.underSecType)
+    ) {
+      throw new RequestError(409, 'IBKR returned a different option underlying instrument type.')
+    }
+    return {
+      ...symbol,
+      option: {
+        kind: 'option',
+        underlying: contract.symbol,
+        underlyingSymbolInfo: { ...underlying, brokerSymbol: underlying.canonicalSymbol },
+        expiration,
+        strike,
+        right: right === 'C' || right === 'CALL' ? 'call' : 'put',
+        multiplier: contract.multiplier,
+        brokerContractId: contract.conId,
+      },
+    }
   }
 
   async getInstrumentDetails(params: {
@@ -701,6 +831,57 @@ export class IbkrService {
       hasNewer: false,
       dataUnavailable: bars.length === 0,
     }
+  }
+
+  private readonly sparklineCache = new Map<
+    string,
+    { expiresAt: number; value: Promise<number[]> }
+  >()
+
+  /**
+   * Recent closes per symbol from one trading day of five-minute bars, through
+   * the same contract qualification and IBKR history request as the chart.
+   * Lines are cached for a few minutes and fetched a few at a time; a symbol
+   * IBKR cannot answer is left out instead of failing the batch.
+   */
+  async getSparklines(symbols: BrokerSymbol[]): Promise<SymbolSparkline[]> {
+    if (this.store.getState().connectionStatus !== 'connected') {
+      throw new RequestError(503, 'IBKR bridge is not connected')
+    }
+    const lines = await mapWithConcurrency(symbols, SPARKLINE_CONCURRENCY, async (symbol) => {
+      try {
+        const values = await this.sparklineValues(symbol)
+        return values.length >= 2 ? { symbol, values } : undefined
+      } catch {
+        return undefined
+      }
+    })
+    return lines.filter((line): line is SymbolSparkline => line !== undefined)
+  }
+
+  private async sparklineValues(symbol: BrokerSymbol): Promise<number[]> {
+    const normalized = normalizeTicker(symbol.symbol)
+    if (!normalized) throw new RequestError(400, 'Symbol is required')
+    const contract = toIbContract(
+      await this.qualifyNativeOptionSymbol({ ...symbol, symbol: normalized }),
+    )
+    const key = JSON.stringify(contract)
+    const cached = this.sparklineCache.get(key)
+    if (cached && cached.expiresAt > Date.now()) return cached.value
+    const value = this.requestHistoricalBars(contract, {
+      endDateTime: formatIbDateTime(Date.now()),
+      duration: SPARKLINE_DURATION,
+      barSize: toIbBarSize(SPARKLINE_INTERVAL).barSize,
+    }).then((bars) => bars.map((bar) => bar.close).filter((close) => Number.isFinite(close)))
+    value.catch(() => {
+      if (this.sparklineCache.get(key)?.value === value) this.sparklineCache.delete(key)
+    })
+    this.sparklineCache.set(key, { value, expiresAt: Date.now() + SPARKLINE_CACHE_MS })
+    if (this.sparklineCache.size > SPARKLINE_CACHE_ENTRIES) {
+      const oldest = this.sparklineCache.keys().next().value
+      if (oldest !== undefined) this.sparklineCache.delete(oldest)
+    }
+    return value
   }
 
   async resolveSession(params: {

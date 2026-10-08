@@ -538,6 +538,19 @@ export interface ForecastOutcomeDetails {
 }
 
 export interface MarketSymbol {
+  /** Broker-qualified option facts, including its exact underlying contract. */
+  option?:
+    | {
+        kind: 'option'
+        underlying: string
+        underlyingSymbolInfo: MarketSymbol
+        expiration: string
+        strike: number
+        right: 'call' | 'put'
+        multiplier?: number | undefined
+        brokerContractId: number
+      }
+    | undefined
   prediction?: ForecastOutcomeDetails | undefined
   ticker: string
   brokerSymbol?: string | undefined
@@ -564,10 +577,20 @@ export interface MarketSymbol {
     | undefined
   currency?: string | undefined
   primaryExchange?: string | undefined
+  /** IBKR's security identifier, shared by listings of the same security. */
+  isin?: string | undefined
   description?: string | undefined
   minTick?: number | undefined
   /** Full route-specific price increment structure returned by TWS reqMarketRule. */
   priceIncrements?: PriceIncrementBand[] | undefined
+}
+
+/** Clusters search rows that are one security listed on several venues or in several currencies. */
+export interface SymbolSearchGroup {
+  /** Stable key shared by every row of the group. */
+  key: string
+  /** Display name of the security the rows share. */
+  label?: string | undefined
 }
 
 export interface SymbolSearchResult {
@@ -575,6 +598,14 @@ export interface SymbolSearchResult {
   displayName?: string | undefined
   description?: string | undefined
   provider?: string | undefined
+  group?: SymbolSearchGroup | undefined
+}
+
+/** Recent closing prices for one requested symbol, oldest first, for compact search-row lines. */
+export interface SymbolSparkline {
+  /** The symbol exactly as requested. */
+  symbol: BrokerSymbol
+  values: number[]
 }
 
 export interface MarketBar {

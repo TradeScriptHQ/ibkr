@@ -20,6 +20,8 @@ import type {
   SdkMarketDepth,
   SessionAggregationCalendarRequest,
   SessionInfo,
+  SparklineRequest,
+  SparklineSeries,
   SymbolInfo,
   SymbolSearchRequest,
   SymbolSearchResult,
@@ -45,6 +47,7 @@ import {
   getBackendQuotes,
   getOptionSeries,
   getQuotes,
+  getSparklines,
   getTimeAndSales,
   loadBars,
   optionSeriesParams,
@@ -280,6 +283,7 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
           displayName: result.displayName,
           description: result.description,
           provider: result.provider ?? 'IBKR',
+          group: result.group,
         }),
       )
     },
@@ -335,6 +339,10 @@ export function createIbkrMarketDatafeed(options: IbkrMarketDatafeedOptions = {}
 
     async getQuotes(request: QuoteRequest): Promise<Quote[]> {
       return getQuotes(baseUrl, request.symbols)
+    },
+
+    async getSparklines(request: SparklineRequest): Promise<SparklineSeries[]> {
+      return getSparklines(baseUrl, request.symbols)
     },
 
     async getOptionContracts(request): Promise<OptionSeriesSnapshot> {

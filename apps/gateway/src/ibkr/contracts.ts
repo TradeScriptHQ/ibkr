@@ -538,11 +538,13 @@ export function toMarketSymbol(details: ContractDetails): MarketSymbol | undefin
     type === 'crypto'
       ? normalizeCryptoExchange(contract.exchange)
       : normalizeStockRoutingExchange(contract.exchange)
+  const isin = type === 'stock' ? contractIsin(details) : undefined
   return {
     ticker,
     canonicalSymbol: contractCanonicalSymbol(contract),
     exchange,
     primaryExchange: type === 'stock' ? contract.primaryExch : undefined,
+    ...(isin ? { isin } : {}),
     name: details.longName ?? details.marketName,
     type,
     currency: contract.currency,
@@ -588,6 +590,12 @@ export function toMarketSymbolSearchResult(
     description: contract.description ?? contract.localSymbol,
     minTick: undefined,
   }
+}
+
+/** The ISIN IBKR lists for a contract, the identity a security keeps on every venue and currency. */
+export function contractIsin(details: ContractDetails): string | undefined {
+  const isin = details.secIdList?.find((id) => id.tag === 'ISIN')?.value?.trim()
+  return isin || undefined
 }
 
 export function parseForexSymbol(

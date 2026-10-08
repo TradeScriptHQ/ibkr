@@ -10,6 +10,7 @@ use std::{
 mod about_menu;
 mod credential_page;
 mod runtime;
+mod workspace_windows;
 use runtime::Runtime;
 use tauri::menu::{Menu, MenuItem, Submenu};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -54,6 +55,8 @@ fn navigation_allowed(url: &tauri::Url, origin: &tauri::Url) -> bool {
 
 fn create_main_window(app: &tauri::App, url: tauri::Url) -> tauri::Result<()> {
     let origin = url.clone();
+    let popout_origin = url.clone();
+    let popout_app = app.handle().clone();
     let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title(&app.package_info().name)
         .inner_size(1440.0, 960.0)
@@ -61,14 +64,18 @@ fn create_main_window(app: &tauri::App, url: tauri::Url) -> tauri::Result<()> {
         // Tauri's native file-drop handler claims every drag, so the page would never
         // receive dragover/drop and workspace tabs could not be rearranged.
         .disable_drag_drop_handler()
-        .on_navigation(move |url| navigation_allowed(url, &origin));
+        .on_navigation(move |url| navigation_allowed(url, &origin))
+        .on_new_window(move |url, features| {
+            workspace_windows::open(&popout_app, url, features, &popout_origin)
+        });
     #[cfg(target_os = "macos")]
     let window = window
         .transparent(true)
         .theme(Some(tauri::Theme::Dark))
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
-        .traffic_light_position(tauri::LogicalPosition::new(18.0, 22.0))
+        // Align the native button centers with the 40px workstation toolbar.
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 26.0))
         .effects(tauri::utils::config::WindowEffectsConfig {
             effects: vec![tauri::utils::WindowEffect::HudWindow],
             state: Some(tauri::utils::WindowEffectState::Active),

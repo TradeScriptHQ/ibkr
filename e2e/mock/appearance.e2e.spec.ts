@@ -4,7 +4,7 @@ async function openSimulation(page: Page) {
   await page.goto('/', { waitUntil: 'domcontentloaded' })
   await expect(page.getByText('Simulated session', { exact: true })).toBeVisible()
   await expect(page.getByRole('region', { name: 'IBKR Chart', exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Chart data', exact: true })).toBeEnabled()
+  await expect(page.locator('.terminal-frame:not(:has(.terminal-overlay))')).toBeVisible()
 }
 
 async function expectAppearance(page: Page, appearance: 'light' | 'dark', chartCount = 1) {
@@ -98,7 +98,7 @@ test('both appearance choices persist after reloading the workstation', async ({
     await page.getByRole('button', { name: 'Light mode', exact: true }).click()
     await expectAppearance(page, appearance)
     await page.reload({ waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('button', { name: 'Chart data', exact: true })).toBeEnabled()
+    await expect(page.locator('.terminal-frame:not(:has(.terminal-overlay))')).toBeVisible()
     await expectAppearance(page, appearance)
   }
 })
@@ -120,7 +120,7 @@ test('the toolbar and appearance controls fit compact and narrow windows', async
       )
       .toBeLessThanOrEqual(1)
 
-    for (const name of ['Light mode', 'Chart data']) {
+    for (const name of ['Light mode', 'SDK settings']) {
       const control = toolbar.getByRole('button', { name, exact: true })
       await expect(control).toBeVisible()
       const bounds = await control.boundingBox()
