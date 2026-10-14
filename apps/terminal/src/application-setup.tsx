@@ -85,7 +85,7 @@ export function ApplicationSetupContent({
           </strong>
           <p>
             {settingsMode
-              ? `SDK ${status?.sdk.version ?? '0.1.34'}`
+              ? `SDK ${status?.sdk.version ?? '0.1.38'}`
               : 'Your workstation. Your broker. Your AI provider.'}
           </p>
         </div>

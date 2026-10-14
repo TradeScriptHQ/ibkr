@@ -39,7 +39,14 @@ for (const [name, entry] of Object.entries({
 }
 const sdk = path.join(root, 'node_modules/@tradescript/pro')
 const identity = JSON.parse(await readFile(path.join(sdk, 'dist/build-identity/core.json'), 'utf8'))
-if (identity.package.version !== '0.1.34') throw new Error('Desktop currently requires SDK 0.1.34')
+const terminalPackage = JSON.parse(
+  await readFile(path.join(root, 'apps/terminal/package.json'), 'utf8'),
+)
+const pinnedVersion = terminalPackage.dependencies['@tradescript/pro'].split('@').at(-1)
+if (identity.package.version !== pinnedVersion)
+  throw new Error(
+    `Desktop requires the pinned SDK ${pinnedVersion}, found ${identity.package.version}`,
+  )
 await writeFile(
   path.join(output, 'sdk.json'),
   JSON.stringify({

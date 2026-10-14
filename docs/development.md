@@ -15,7 +15,7 @@ The development UI origin is `http://localhost:3000` and must match the SDK leas
 ## SDK boundary
 
 The stable import is `@tradescript/pro`; the installed alias/version is pinned in
-`apps/terminal/package.json` and the lockfile. Current builds use package 0.1.34.
+`apps/terminal/package.json` and the lockfile. Current builds use package 0.1.38.
 `npm run tradescript:install` validates the package coordinate/version from local
 configuration and installs the alias without persisting the npm token.
 

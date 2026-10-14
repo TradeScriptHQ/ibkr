@@ -12,7 +12,7 @@
   "dependencies": {
     "@ibkr-terminal/contracts": "0.1.0",
     "@tauri-apps/api": "^2.11.1",
-    "@tradescript/pro": "npm:@tradescript/pro-developer-console-free@0.1.34",
+    "@tradescript/pro": "npm:@tradescript/pro-developer-console-free@0.1.38",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

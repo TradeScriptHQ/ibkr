@@ -42,7 +42,7 @@ To create an installable app, run:
 npm run desktop:build
 ```
 
-Packaged desktop builds always use the packaged SDK 0.1.34.
+Packaged desktop builds use the SDK version pinned in `apps/terminal/package.json` (currently 0.1.38).
 `TRADESCRIPT_SDK_SOURCE` is never included in releases.
 The preparation script downloads official Node 24.21.0 and verifies its SHA-256
 checksum. It never packages a Homebrew executable with external library dependencies. Build on each target platform/architecture.

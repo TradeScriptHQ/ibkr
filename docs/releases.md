@@ -16,7 +16,7 @@ Configure the release repository:
   `ibkr` project, `prd` config. The workflow fetches the release secrets from
   Doppler at build time; it never stores them directly.
 - Doppler `ibkr` / `prd` secrets: `TRADESCRIPT_NPM_TOKEN` (download permission for
-  SDK 0.1.34) and `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+  SDK 0.1.38) and `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 - Variable `TAURI_UPDATER_PUBLIC_KEY`: the matching public key (public, so it is a
   repository variable rather than a Doppler secret).
 - Environment `production`: the build job references it; configure its protection
