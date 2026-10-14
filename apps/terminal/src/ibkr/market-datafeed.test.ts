@@ -953,7 +953,9 @@ it('declares footprint and liquidity-heatmap support backed by the classified ta
 
 it('pages footprint history through the tape with its time window and sequence cursor', async () => {
   const fetchMock = vi.fn(async (_input: RequestInfo | URL) =>
-    Response.json([{ time: 1_790_000_001_000, price: 101, size: 2, aggressor: 'buy', sequence: 7 }]),
+    Response.json([
+      { time: 1_790_000_001_000, price: 101, size: 2, aggressor: 'buy', sequence: 7 },
+    ]),
   )
   vi.stubGlobal('fetch', fetchMock)
   const feed = createIbkrMarketDatafeed({ baseUrl: 'http://localhost/api' })

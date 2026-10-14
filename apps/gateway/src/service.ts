@@ -132,9 +132,10 @@ export async function startGatewayService() {
   const close = () => {
     closing ??= (async () => {
       try {
-        connections.runtime.stop()
+        const brokerClosed = connections.runtime.stop()
         leases.stop()
         await app.close()
+        await brokerClosed
       } finally {
         database.close()
       }

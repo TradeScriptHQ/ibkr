@@ -11,7 +11,10 @@
     {
       "name": "charts-pro-preview",
       "runtimeExecutable": "sh",
-      "runtimeArgs": ["-c", "cd /Users/miyuru/Repos/TradeMind/charts-pro && exec npx vite --port 5318 --strictPort"],
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/miyuru/Repos/TradeMind/charts-pro && exec npx vite --port 5318 --strictPort"
+      ],
       "port": 5318
     }
   ]

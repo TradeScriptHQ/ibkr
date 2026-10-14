@@ -17,9 +17,10 @@ import { discoverTwsAccounts } from './test-connection.js'
 
 export interface ConnectionRuntime {
   connectedAccounts?(): readonly string[] | undefined
+  testConnection?(): Promise<readonly string[]>
   retryConnection?(): void
   start(): void
-  stop(): void
+  stop(): void | Promise<void>
 }
 
 /** One active broker session. Switching waits for submitted operations to finish. */
@@ -30,6 +31,7 @@ export class ConnectionManager<T extends ConnectionRuntime> {
   #runtime: T
   #switching = false
   #test: { id: string; key: string; accounts: string[] } | undefined
+  #pendingTest: { key: string; result: Promise<{ testId: string; accounts: string[] }> } | undefined
   #operations = new Set<Promise<unknown>>()
 
   constructor(
@@ -186,25 +188,42 @@ export class ConnectionManager<T extends ConnectionRuntime> {
       profile.clientId,
     ])
   }
+  /** Concurrent tests of one endpoint share a single probe; a different endpoint waits its turn. */
   async test(settings: ConnectionSettings, generation: string) {
     if (this.#switching || generation !== this.#generation)
       throw new RequestError(409, 'Connection settings changed. Try again.')
+    const key = this.testKey(settings)
+    if (this.#pendingTest) {
+      if (this.#pendingTest.key === key) return this.#pendingTest.result
+      throw new RequestError(409, 'Another connection test is running. Try again when it finishes.')
+    }
+    const result = this.runTest(settings, generation, key)
+    const pending = { key, result }
+    this.#pendingTest = pending
+    try {
+      return await result
+    } finally {
+      if (this.#pendingTest === pending) this.#pendingTest = undefined
+    }
+  }
+  private async runTest(settings: ConnectionSettings, generation: string, key: string) {
     this.#test = undefined
     const profile = settings.profiles[settings.active]
     const current = this.#settings.profiles[this.#settings.active]
-    const connected =
-      current.port === profile.port && current.clientId === profile.clientId
-        ? this.#runtime.connectedAccounts?.()
-        : undefined
+    const sameSocket = current.port === profile.port && current.clientId === profile.clientId
+    const runtime = this.#runtime
+    const connected = sameSocket ? runtime.connectedAccounts?.() : undefined
     const accounts = [
       ...(connected?.length
         ? connected
-        : await this.discover(
-            this.initial.ibkr.host,
-            profile.port,
-            profile.clientId,
-            profile.connectionType,
-          )),
+        : sameSocket && runtime.testConnection
+          ? await runtime.testConnection()
+          : await this.discover(
+              this.initial.ibkr.host,
+              profile.port,
+              profile.clientId,
+              profile.connectionType,
+            )),
     ]
     const label = connectionTypeLabel(profile.connectionType)
     if (!accounts.length) throw new RequestError(400, `${label} returned no accounts.`)
@@ -215,7 +234,7 @@ export class ConnectionManager<T extends ConnectionRuntime> {
       )
     if (generation !== this.#generation)
       throw new RequestError(409, 'Connection changed during the test. Try again.')
-    this.#test = { id: randomUUID(), key: this.testKey(settings), accounts }
+    this.#test = { id: randomUUID(), key, accounts }
     return { testId: this.#test.id, accounts }
   }
   async switch(
@@ -246,7 +265,8 @@ export class ConnectionManager<T extends ConnectionRuntime> {
       }
       const runtime = this.create(this.configuration(next))
       this.persist(next)
-      this.#runtime.stop()
+      // The replacement reuses the client ID, so the old socket must close first.
+      await this.#runtime.stop()
       this.#settings = next
       this.#generation = randomUUID()
       this.#runtime = runtime

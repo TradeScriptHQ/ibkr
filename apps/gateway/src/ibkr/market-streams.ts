@@ -215,7 +215,11 @@ export class MarketStreams {
       return stream.prints.slice(-count)
     const selected: TapePrint[] = []
     const oldest = Math.max(0, stream.prints.length - stream.retention)
-    for (let index = stream.prints.length - 1; index >= oldest && selected.length < count; index--) {
+    for (
+      let index = stream.prints.length - 1;
+      index >= oldest && selected.length < count;
+      index--
+    ) {
       const print = stream.prints[index] as TapePrint
       if (startTime !== undefined && print.time < startTime) break
       if (endTime !== undefined && print.time > endTime) continue

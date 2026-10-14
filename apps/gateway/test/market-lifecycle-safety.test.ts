@@ -91,7 +91,9 @@ describe('desired market subscriptions across socket generations', () => {
     api.emit(EventName.updateMktDepth, oldId, 0, 0, 1, 999, 20)
     expect(runtime.brokerStore.getState().marketDepths?.[0]?.bids).toEqual([])
     api.emit(EventName.updateMktDepth, newId, 0, 0, 1, 101, 30)
-    expect(runtime.brokerStore.getState().marketDepths?.[0]?.bids).toEqual([{ price: 101, size: 30 }])
+    expect(runtime.brokerStore.getState().marketDepths?.[0]?.bids).toEqual([
+      { price: 101, size: 30 },
+    ])
   })
 
   it('preserves an option SSE owner through disconnect and ignores late prices before a fresh ready stream', () => {
