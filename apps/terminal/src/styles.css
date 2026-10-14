@@ -223,6 +223,273 @@ button {
 .toolbar-utilities {
   gap: 2px;
 }
+.workspace-picker {
+  position: relative;
+  flex-shrink: 0;
+}
+.workspace-picker-trigger {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  max-width: 205px;
+  padding: 0 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 9px;
+  background: var(--app-control);
+  color: var(--app-text);
+  font-size: 11px;
+  cursor: pointer;
+}
+.workspace-picker-trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.workspace-picker-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-picker-trigger svg,
+.workspace-dirty,
+.workspace-chevron {
+  flex-shrink: 0;
+}
+.workspace-dirty {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--app-warning);
+}
+.workspace-chevron {
+  color: var(--app-text-muted);
+  margin-top: -3px;
+}
+.workspace-picker-menu {
+  position: absolute;
+  top: calc(100% + 9px);
+  right: 0;
+  width: min(365px, calc(100vw - 24px));
+  max-height: calc(var(--app-height) - 70px);
+  overflow: auto;
+  padding: 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 15px;
+  background: var(--app-surface-solid);
+  box-shadow: 0 14px 45px var(--app-shadow);
+  color: var(--app-text);
+  text-align: left;
+}
+.workspace-picker-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 9px;
+  font-size: 11px;
+}
+.workspace-picker-heading > span,
+.workspace-picker-hint,
+.workspace-profile-copy > span,
+.workspace-dialog-note {
+  color: var(--app-text-muted);
+}
+.workspace-profile-list {
+  display: grid;
+  gap: 3px;
+}
+.workspace-profile-option {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 11px;
+  padding: 10px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-text);
+  text-align: left;
+  cursor: pointer;
+}
+.workspace-profile-option:hover,
+.workspace-profile-actions button:hover:not(:disabled),
+.workspace-picker-trigger:hover:not(:disabled) {
+  background: var(--app-control-hover);
+}
+.workspace-profile-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+.workspace-profile-copy strong {
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.workspace-profile-copy > span {
+  font-size: 10px;
+  line-height: 1.45;
+}
+.workspace-profile-check {
+  width: 13px;
+  flex-shrink: 0;
+  color: var(--app-text);
+}
+.workspace-mini {
+  display: grid;
+  grid-template-columns: 10px 26px 10px;
+  grid-template-rows: 21px 11px;
+  gap: 2px;
+  flex-shrink: 0;
+  width: 50px;
+  height: 34px;
+}
+.workspace-mini i {
+  background: var(--app-border);
+  border-radius: 2px;
+}
+.workspace-mini i:first-child {
+  grid-row: 1 / 3;
+}
+.workspace-mini i:nth-child(2) {
+  background: #2f64ff;
+  opacity: 0.75;
+}
+.workspace-mini i:nth-child(3) {
+  grid-row: 1 / 3;
+  grid-column: 3;
+}
+.workspace-mini-options i:nth-child(2) {
+  background: #a285ff;
+}
+.workspace-mini-active {
+  grid-template-columns: 8px 21px 17px;
+}
+.workspace-mini-active i:nth-child(3) {
+  background: #28b78f;
+  opacity: 0.6;
+}
+.workspace-mini-charts {
+  grid-template-rows: 28px 4px;
+}
+.workspace-mini-portfolio {
+  grid-template-rows: 26px 6px;
+}
+.workspace-mini-portfolio i:nth-child(2) {
+  background: #28b78f;
+}
+.workspace-custom-list {
+  max-height: 175px;
+  overflow: auto;
+}
+.workspace-custom-option {
+  padding-left: 13px;
+}
+.workspace-profile-actions {
+  display: grid;
+  border-top: 1px solid var(--app-border-soft);
+  margin-top: 8px;
+  padding-top: 6px;
+}
+.workspace-profile-actions button {
+  border: 0;
+  border-radius: 7px;
+  padding: 9px;
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.workspace-profile-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.workspace-profile-management {
+  display: flex;
+}
+.workspace-profile-management button {
+  flex: 1;
+}
+.workspace-picker-hint {
+  padding: 4px 9px;
+  margin: 5px 0 2px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.workspace-profile-error {
+  position: absolute;
+  right: 12px;
+  top: calc(100% + 8px);
+  max-width: 360px;
+  padding: 10px 14px;
+  border: 1px solid var(--app-warning-border);
+  border-radius: 10px;
+  background: var(--app-surface-solid);
+  color: var(--app-warning);
+  font-size: 12px;
+}
+.workspace-layout-dialog {
+  padding: 18px 22px 22px;
+  color: var(--app-text);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.workspace-layout-dialog p {
+  margin: 0 0 16px;
+}
+.workspace-layout-dialog label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+.workspace-layout-dialog input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 9px;
+  background: var(--app-control);
+  color: var(--app-text);
+  font: inherit;
+}
+.workspace-layout-dialog .workspace-dialog-note {
+  margin-top: 12px;
+  font-size: 11px;
+}
+.workspace-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+.workspace-dialog-actions button {
+  padding: 8px 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 9px;
+  background: var(--app-secondary);
+  color: var(--app-secondary-text);
+  font: inherit;
+  cursor: pointer;
+}
+.workspace-dialog-actions .workspace-primary {
+  background: var(--app-primary);
+  color: var(--app-primary-text);
+}
+.workspace-dialog-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.workspace-layout-dialog .workspace-dialog-error {
+  margin: 10px 0;
+  color: var(--app-danger);
+}
+.workspace-picker button:focus-visible,
+.workspace-layout-dialog button:focus-visible,
+.workspace-layout-dialog input:focus-visible {
+  outline: 2px solid var(--app-focus);
+  outline-offset: 2px;
+}
 .toolbar-connection .connection-health-control {
   display: flex;
   align-items: center;

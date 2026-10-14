@@ -36,7 +36,9 @@ import type { ConnectionRiskAuthority } from './risk.js'
 import { followSdkLease } from './sdk-lease-renewal.js'
 import { createTerminalTradeScriptSdk, currentCsrfToken } from './terminal-session.js'
 import { createLocalWatchlistAdapter } from './watchlist.js'
-import { activateWorkstationWidget, arrangeDesktopWorkstation } from './workspace-layout.js'
+import { activateWorkstationWidget } from './workspace-layout.js'
+import { arrangeWorkspacePreset } from './workspace-presets.js'
+import type { WorkspaceProfiles } from './workspace-profiles.js'
 import {
   type AgentRiskAvailability,
   initializeWorkstationAgentRisk,
@@ -86,6 +88,7 @@ export interface WorkstationOptions {
   readonly setActiveInstrument: (symbol: SdkSymbolInfo) => void
   readonly setLoadState: (state: LoadState) => void
   readonly mockMode: boolean
+  readonly workspaceProfiles?: WorkspaceProfiles
 }
 
 export async function initializeWorkstationTrading(
@@ -108,6 +111,7 @@ export function createWorkstation({
   setActiveInstrument,
   setLoadState,
   mockMode,
+  workspaceProfiles,
 }: WorkstationOptions) {
   const lifetime = new WorkstationLifetime()
   let terminal: TradingTerminalApi | undefined
@@ -433,12 +437,19 @@ export function createWorkstation({
         requestAnimationFrame(() => {
           if (lifetime.disposed) return
           destroyLayoutSizing?.()
-          destroyLayoutSizing = arrangeDesktopWorkstation(
-            layout,
-            host,
-            optionChartOptions.initialWidthFraction,
-          )
+          destroyLayoutSizing = workspaceProfiles
+            ? workspaceProfiles.connect(layout, host)
+            : arrangeWorkspacePreset(
+                'stocks',
+                layout,
+                host,
+                layout.listPanels().map((panel) => panel.widgetType),
+                () => undefined,
+              )
         })
+      },
+      onLayoutChange() {
+        workspaceProfiles?.capture()
       },
       onTerminalReady(api) {
         if (lifetime.disposed) return

@@ -3,6 +3,7 @@ import type { RefObject } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAppearanceStore } from './appearance-ui.js'
 import { subscribeBrowserSessionChanges } from './terminal-session.js'
+import type { WorkspaceProfiles } from './workspace-profiles.js'
 import { type ChartDataSnapshot, createWorkstation, type LoadState } from './workstation.js'
 import { workstationLoading } from './workstation-startup.js'
 
@@ -14,6 +15,7 @@ export function useWorkstation(
   chartBarsReader: RefObject<() => ChartDataSnapshot>,
   setActiveInstrument: (symbol: SdkSymbolInfo) => void,
   setupReady: boolean,
+  workspaceProfiles: WorkspaceProfiles,
 ): LoadState & { retry(): void } {
   const appearance = useAppearanceStore()
   const [attempt, setAttempt] = useState(0)
@@ -45,6 +47,7 @@ export function useWorkstation(
         setActiveInstrument,
         setLoadState,
         mockMode: import.meta.env.VITE_TRADING_MODE === 'mock',
+        workspaceProfiles,
       })
     }
     void start()
@@ -63,6 +66,7 @@ export function useWorkstation(
     setActiveInstrument,
     attempt,
     setupReady,
+    workspaceProfiles,
   ])
   return { ...loadState, retry }
 }

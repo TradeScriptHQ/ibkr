@@ -15,6 +15,8 @@ import {
   type LoadState,
   useWorkstation,
 } from './use-workstation.js'
+import { WorkspacePicker } from './workspace-picker.js'
+import { createWorkspaceProfiles } from './workspace-profiles.js'
 import { type WorkstationSetupState, workstationLoading } from './workstation-startup.js'
 
 const MOCK_MODE = import.meta.env.VITE_TRADING_MODE === 'mock'
@@ -26,6 +28,7 @@ export function App({
   settings: ApplicationSettingsState
 }) {
   const [activeInstrument, setActiveInstrument] = useState<SdkSymbolInfo>()
+  const [workspaceProfiles] = useState(createWorkspaceProfiles)
   const terminalHost = useRef<HTMLDivElement>(null)
   const topbar = useRef<HTMLElement>(null)
   const sessionMetaHost = useRef<HTMLDivElement>(null)
@@ -47,6 +50,7 @@ export function App({
     chartBarsReader,
     setActiveInstrument,
     setup.ready,
+    workspaceProfiles,
   )
   const loadState: LoadState = setup.ready
     ? workstation
@@ -161,6 +165,7 @@ export function App({
       <AppNotification message={retryError} occurrence={retryAttempt} />
       <AppNotification message={chartDataError} occurrence={chartDataAttempt} />
       <TerminalToolbar headerRef={topbar}>
+        <WorkspacePicker profiles={workspaceProfiles} />
         <div ref={sessionMetaHost} className="toolbar-market-session" />
         {!MOCK_MODE && setup.ready && (
           <div className="toolbar-connection">

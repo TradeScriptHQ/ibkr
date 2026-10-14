@@ -24,6 +24,132 @@ No historical source-only fix is asserted as an outstanding packaged blocker her
 Reproduce issues against the installed package before adding them. Host limitations
 and release qualification gaps are tracked in [limitations](limitations.md).
 
+## Softer volumetric edges and shaded execution balls (2026-10-11)
+
+- **Scope:** Visual refinement in the synthetic external-source SDK `0.1.36`
+  preview. This does not assert a published package upgrade.
+- **Requested behavior:** Increase the fade around volumetric ovals and use
+  Bookmap-like execution balls with an upper-left highlight and deeper
+  lower-right shading as the default. Execution sizes still represent
+  clustered volume; explicit ring
+  and flat-circle selections remain available.
+- **Verification:** Rendered both styles at normal and close zoom in the
+  synthetic preview, and confirmed Shaded balls is selected in settings.
+  All 8,865 SDK tests and typechecking pass; website and root script gates pass.
+  The installed terminal package remains `0.1.34`.
+
+## Volumetric heatmap edge fade (2026-10-11)
+
+- **Scope:** External SDK source `0.1.36` in the synthetic order-flow preview.
+- **Reproduction:** Zoom into volumetric levels. Their opaque oval silhouettes
+  have only single-pixel antialiasing, leaving hard borders instead of the
+  reference's gradual fade.
+- **Source fix:** The raster now fades opacity inward from the entire ellipse
+  perimeter, keeping an opaque core and unchanged quantity/palette semantics.
+  The fade follows screen-space distance and stays inside each oval's existing
+  footprint. Volumetric raster drawing and the lens use smooth interpolation.
+- **Verification:** The complete layer test file passes (56 tests), including
+  gradual opacity on both axes at multiple zoom levels, palette preservation,
+  thin-level brightness during fractional pans, clipping, and incremental
+  rendering. All 8,865 SDK tests and typechecking pass, along with the website
+  and root script gates. Rendered close-up in the preview; this does not assert
+  a published SDK or broker-data verification.
+
+## Heatmap magnifier steps between candles (2026-10-11)
+
+- **Scope:** Synthetic external-source preview using SDK source `0.1.36`.
+  The installed terminal package remains `0.1.34`; packaged behavior has not
+  been qualified for this change.
+- **Reproduction:** Enable the liquidity grid magnifier and move the pointer
+  horizontally within one candle. The table stays still and then jumps to the
+  next candle. Near a pane edge it can also jump to the pointer's other side.
+- **Source cause / fix:** The render frame dropped the raw pointer x coordinate
+  and placed the magnifier using the candle-snapped crosshair. Both grid and
+  lens now receive the raw coordinate for placement and sampling. Placement
+  clamps continuously at pane edges, and grid columns keep stable widths as
+  hovered values change. Existing candle crosshair semantics are preserved.
+- **Verification:** Both complete affected SDK test files pass (59 tests),
+  including fractional movement within a candle, edge transitions, stable
+  column widths and frame transport. In the synthetic preview, a five-pixel
+  pointer move within the same candle moves the grid five pixels. The full SDK
+  suite passes (8,861 tests), and SDK typechecking passes. No published fixed
+  package or broker-data verification is asserted.
+
+## Order-flow visual refresh (2026-10-10)
+
+- **Scope:** Requested and verified in the synthetic external-source order-flow
+  preview using SDK source version `0.1.36`. The terminal's installed package is
+  still `0.1.34`; this is source-preview qualification, not a published upgrade.
+- **Reproduction / requested result:** Volumetric liquidity should use tapered
+  purple-to-yellow ovals like the supplied reference; execution markers should
+  replace shaded balls with a restrained modern treatment; liquidation bands
+  should be more defined; settings tabs should match workspace tabs.
+- **Upstream changes:** Antialiased volumetric ovals and an `Aurora ovals`
+  template; theme-colored execution rings as the new default, with existing
+  explicit sphere/flat selections preserved; thinner liquidation cores; shared
+  workspace-style settings tabs. Raw book quantities and liquidation estimates
+  keep their existing meaning. No terminal CSS or installed-package patch is
+  used.
+- **Verification:** Rendered at `http://localhost:5318/order-flow-preview.html`,
+  including chart panning, zooming and settings keyboard navigation. The full
+  SDK suite passes all 8,856 tests, and SDK type checking passes. Generated
+  reference/search checks pass; the docs-quality audit retains eight existing
+  missing `RiskOrderLegExposure` property descriptions, unchanged from HEAD.
+  This preview contains generated data only and does not establish IBKR data
+  availability or broker behavior. No published fixed version is asserted.
+
+## Volumetric liquidity rows duplicate while dragging (2026-10-10)
+
+- **Scope:** Reproduced in the synthetic external-source order-flow preview
+  using SDK source version `0.1.36`. The installed terminal package remains
+  `0.1.34`; the packaged baseline has not been tested for this defect.
+- **Reproduction:** Enable the liquidity heatmap's volumetric level style,
+  enlarge the price scale, and drag the chart vertically. A strong resting-book
+  price level flickers between one, two, and sometimes three rows of pills.
+- **Verified source cause / expected behavior:** A pixel overlapping a price
+  bucket boundary inherited the stronger neighbouring quantity. The pill pass
+  then treated that pixel as a separate price level, duplicating the same book
+  quantity. One populated native bucket must produce one pill per time slot,
+  independent of fractional pixel alignment during panning.
+- **Upstream source fix:** Pills now average quantities over their time slots
+  while preserving each native bucket's identity and projecting its actual
+  price boundaries. Smoothing retains native level identity, and logarithmic
+  price scales use a bucket at the displayed price instead of price zero.
+  No consumer workaround or installed-package patch is added.
+- **Verification / qualification:** The complete affected SDK test file passes
+  all 42 tests, including fractional pans, close and subpixel zoom, logarithmic
+  axes, smoothing, clipping, side colours, time averaging and incremental live
+  updates. Browser dragging at close zoom keeps the bright band on one row.
+  The full SDK sweep passes all 8,845 tests with
+  `NODE_OPTIONS=--no-experimental-webstorage`, and SDK type checking passes.
+  Website checks pass 541 unit and 34 script tests. The repository script sweep
+  passes 440 of 442 tests; two activation tests time out under concurrent load,
+  then the complete affected test file passes on retry (15/15).
+  This remains a local source fix; no published fixed version is asserted.
+
+## TPO row shading extends past its letters (2026-10-09)
+
+- **Scope:** Reproduced in the synthetic external-source order-flow preview
+  using SDK source version `0.1.36`. The terminal's installed package remains
+  `0.1.34`; this issue has not been reproduced against that packaged baseline.
+- **Reproduction:** Display a TPO market profile with letters enabled and
+  enlarge the price scale until the letters are readable. In sparsely populated
+  profiles, shaded price rows continue beyond the last letter, leaving an empty
+  tail that resembles additional time periods.
+- **Expected / upstream source fix:** Each time period occupies the same
+  horizontal cell in both the shading and letter layout. The SDK now derives
+  both from one cell width, preserving the profile's geometry when zooming
+  hides or reveals letters. No consumer styling workaround is added.
+- **Verification / qualification:** Both complete affected SDK test files
+  pass all 40 tests, including sparse/dense profiles, different letter sizes,
+  zoom, and clipping. Verified in the rendered synthetic source preview.
+  The full SDK suite passes all 8,831 tests with the repository's documented
+  `NODE_OPTIONS=--no-experimental-webstorage` setting, and SDK type checking
+  passes. Website checks pass 541 unit and 34 script tests. The repository
+  script sweep passes 441 of 442 tests; the remaining activation test times
+  out under concurrent load, then passes on a complete-file retry (15/15).
+  This is a local upstream source fix; no published fixed version is asserted.
+
 ## Options Order price shortcuts clip in narrow fields (2026-10-07)
 
 - **Installed baseline / scope:** The terminal's installed `@tradescript/pro`

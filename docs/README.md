@@ -6,6 +6,7 @@ build, account and environment tested; old development logs are not release evid
 | Guide | Purpose |
 | --- | --- |
 | [Product](product.md) | Paper/live modes, permissions and supported workflows |
+| [Workspace layouts](workspace-layouts.md) | Trading presets, customization, saved layouts, and platform research |
 | [Architecture](architecture.md) | Workspace boundaries and runtime ownership |
 | [Development](development.md) | Local setup, SDK integration and state locations |
 | [Testing](testing.md) | Verification commands, paper guards and cleanup ownership |
