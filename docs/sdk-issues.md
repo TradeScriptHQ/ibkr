@@ -16,9 +16,9 @@ credentials, account data or internal development logs into this repository. Kee
 private upstream implementation notes in their owning project. Do not patch
 `node_modules`, add consumer casts, or conceal SDK failures with UI workarounds.
 
-As of 2026-10-14 the terminal installs published package `0.1.38`. Entries below that
-name `0.1.34` record the baseline when they were written; re-check them against `0.1.38`
-before treating them as current packaged blockers.
+As of 2026-10-15 the terminal installs published package `0.1.43`. Entries below that
+name `0.1.34` or `0.1.38` record the baseline when they were written; re-check them against
+`0.1.43` before treating them as current packaged blockers.
 
 No historical source-only fix is asserted as an outstanding packaged blocker here.
 Reproduce issues against the installed package before adding them. Host limitations

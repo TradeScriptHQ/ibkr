@@ -45,7 +45,7 @@ npm run desktop:build
 On macOS, `npm run desktop:build:macos` produces the same build signed with the local
 Developer ID identity and, when configured, notarized; see [releases](releases.md).
 
-Packaged desktop builds use the SDK version pinned in `apps/terminal/package.json` (currently 0.1.38).
+Packaged desktop builds use the SDK version pinned in `apps/terminal/package.json` (currently 0.1.43).
 `TRADESCRIPT_SDK_SOURCE` is never included in releases.
 The preparation script downloads official Node 24.21.0 and verifies its SHA-256
 checksum. It never packages a Homebrew executable with external library dependencies. Build on each target platform/architecture.

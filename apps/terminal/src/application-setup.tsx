@@ -188,7 +188,7 @@ export function ApplicationSetupContent({
   if (settingsMode)
     return (
       <div className="setup-content setup-settings">
-        {heading('TradeScript SDK', `SDK ${status?.sdk.version ?? '0.1.38'}`)}
+        {heading('TradeScript SDK', `SDK ${status?.sdk.version ?? '0.1.43'}`)}
         {checking}
         <section className="setup-settings-section" aria-label="SDK access">
           {status?.sdk.ready && <p className="setup-success">SDK credentials saved · Activated</p>}
