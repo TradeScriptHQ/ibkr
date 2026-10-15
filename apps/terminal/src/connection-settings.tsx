@@ -12,6 +12,9 @@ import { AppModal } from './appearance-ui.js'
 import { readConnection } from './connection-client.js'
 import { bootstrapBrowserSession, CLIENT_HEADERS } from './terminal-session.js'
 
+/** Opens the toolbar connection dialog from elsewhere, such as the status popover. */
+export const OPEN_CONNECTION_SETTINGS = 'terminal:connection-settings'
+
 export function ConnectionSettingsButton({ inline = false }: { inline?: boolean }) {
   const [snapshot, setSnapshot] = useState<ConnectionSnapshot>()
   const [settings, setSettings] = useState<ConnectionSettings>()
@@ -68,6 +71,12 @@ export function ConnectionSettingsButton({ inline = false }: { inline?: boolean 
       window.clearInterval(timer)
     }
   }, [])
+  useEffect(() => {
+    if (inline) return
+    const openSettings = () => setOpen(true)
+    window.addEventListener(OPEN_CONNECTION_SETTINGS, openSettings)
+    return () => window.removeEventListener(OPEN_CONNECTION_SETTINGS, openSettings)
+  }, [inline])
   const updateProfile = (patch: Partial<ConnectionSettings['profiles']['paper']>) => {
     if (!settings) return
     if (

@@ -7,6 +7,8 @@ import {
 } from '@ibkr-terminal/contracts'
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { retryConnection } from './connection-client.js'
+import { OPEN_CONNECTION_SETTINGS } from './connection-settings.js'
 import { bootstrapBrowserSession, CLIENT_HEADERS } from './terminal-session.js'
 
 export function connectionRecoveryDetails(session: RequirementStatus | undefined, now: number) {
@@ -201,6 +203,8 @@ export function ConnectionHealth({
 }) {
   const { status, session, now } = connection
   const [open, setOpen] = useState(false)
+  const [retrying, setRetrying] = useState(false)
+  const [retryError, setRetryError] = useState('')
   const container = useRef<HTMLDivElement>(null)
   const details = useRef<HTMLElement>(null)
   const id = useId()
@@ -266,6 +270,41 @@ export function ConnectionHealth({
             ) : (
               <p>{status.detail}</p>
             )}
+            {status.tone !== 'connected' && status.tone !== 'pending' && (
+              <div className="connection-health-actions">
+                <button
+                  type="button"
+                  disabled={retrying}
+                  onClick={async () => {
+                    setRetrying(true)
+                    setRetryError('')
+                    try {
+                      await retryConnection()
+                    } catch (cause) {
+                      setRetryError(
+                        cause instanceof Error
+                          ? cause.message
+                          : 'The connection could not be retried.',
+                      )
+                    } finally {
+                      setRetrying(false)
+                    }
+                  }}
+                >
+                  {retrying ? 'Retrying…' : 'Retry now'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpen(false)
+                    window.dispatchEvent(new Event(OPEN_CONNECTION_SETTINGS))
+                  }}
+                >
+                  Connection settings
+                </button>
+              </div>
+            )}
+            {retryError && <p role="alert">{retryError}</p>}
           </section>,
           document.body,
         )}

@@ -1753,6 +1753,39 @@ h1 {
   margin: 8px 0 0;
   color: var(--app-text-secondary);
 }
+.connection-health-details p[role="alert"] {
+  color: var(--app-danger);
+}
+.connection-health-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+.connection-health-actions button {
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-secondary);
+  color: var(--app-secondary-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.connection-health-actions button:first-child {
+  border-color: var(--app-primary-border);
+  background: var(--app-primary);
+  color: var(--app-primary-text);
+}
+.connection-health-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.connection-health-actions button:focus-visible {
+  outline: 2px solid var(--app-focus);
+  outline-offset: 2px;
+}
 .connection-recovery {
   max-width: 420px;
   font-size: 13px;
