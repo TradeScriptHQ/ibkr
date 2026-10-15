@@ -27,8 +27,28 @@ The workflow derives the update URL from its GitHub repository:
 Use a public release repository so installed apps can download without GitHub
 credentials. Updater signatures are separate from platform code signing.
 
-Apple code signing and notarization are **not yet configured**. macOS installers
-are built unsigned; before public distribution add Apple secrets
+### macOS signing on a local Mac
+
+`npm run desktop:build:macos` signs the app, its bundled Node executable and the DMG
+with the keychain's single **Developer ID Application** identity (set
+`APPLE_SIGNING_IDENTITY` to choose another), using the hardened runtime and
+`Entitlements.plist`. Pass `tauri build` options after `--`, for example
+`npm run desktop:build:macos -- --config src-tauri/tauri.release.json --bundles app,dmg`.
+
+Notarization uses a notarytool keychain profile. Create it once (it prompts for an
+Apple ID app-specific password, which stays in the keychain):
+
+```sh
+xcrun notarytool store-credentials ibkr-notary --apple-id <apple-id> --team-id 49ZR9696NH
+```
+
+Then build with `APPLE_NOTARY_PROFILE=ibkr-notary`. The script submits each DMG, waits,
+staples the DMG and app, and checks the app with `spctl`. Without the profile it
+warns that the build is signed but not notarized; Gatekeeper still blocks
+downloaded copies.
+
+The GitHub **Desktop release** workflow still builds macOS installers unsigned. To
+sign there too, add Apple secrets
 `APPLE_CERTIFICATE` (base64 P12), `APPLE_CERTIFICATE_PASSWORD`,
 `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD` (app-specific password),
 and `APPLE_TEAM_ID` to Doppler, extend the secret selection contract and its tests

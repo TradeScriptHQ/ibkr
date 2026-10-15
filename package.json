@@ -29,6 +29,7 @@
     "desktop:prepare": "npm run build:shared && npm run build --workspace=@ibkr-terminal/terminal && npm run bundle:runtime --workspace=@ibkr-terminal/desktop",
     "desktop:dev": "node scripts/desktop/dev.mjs",
     "desktop:build": "npm run desktop:prepare && npm run build --workspace=@ibkr-terminal/desktop",
+    "desktop:build:macos": "node scripts/desktop/build-macos.mjs",
     "test:e2e:desktop": "npm run build:shared && npm run build --workspace=@ibkr-terminal/terminal && playwright test --config=playwright.desktop.config.ts",
     "test:e2e:ui": "playwright test --config=playwright.ui.config.ts",
     "test:e2e:guards": "node --import tsx --test e2e/support/*.test.ts",
