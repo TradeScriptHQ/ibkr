@@ -71,63 +71,8 @@ export function ApplicationSetupContent({
   const credentialsNeedUpdating = status !== undefined && sdkCredentialsNeedUpdating(status.sdk)
   const showCredentials =
     !status?.sdk.configured || (recovery && credentialsNeedUpdating) || replacementRequested
-  return (
-    <div className={`setup-content${settingsMode ? ' setup-settings' : ''}`}>
-      <div className="setup-heading">
-        <img className="brand-mark" src={APP_LOGO} alt="" />
-        <div>
-          <strong>
-            {settingsMode
-              ? 'TradeScript SDK'
-              : recovery
-                ? 'Restore SDK access'
-                : `Welcome to ${APP_NAME}`}
-          </strong>
-          <p>
-            {settingsMode
-              ? `SDK ${status?.sdk.version ?? '0.1.38'}`
-              : 'Your workstation. Your broker. Your AI provider.'}
-          </p>
-        </div>
-      </div>
-      {(renewing || (recovery && !notice)) && <p role="status">Checking SDK authorization…</p>}
-      {settingsMode ? (
-        <section className="setup-settings-section" aria-label="SDK access">
-          {status?.sdk.ready && <p className="setup-success">SDK credentials saved · Activated</p>}
-          {!replacementRequested && (
-            <button type="button" disabled={busy} onClick={onReplace}>
-              Replace credentials
-            </button>
-          )}
-        </section>
-      ) : (
-        <>
-          <div className="setup-step">
-            <span>01</span>
-            <div>
-              <strong>
-                {accessNeedsRenewal
-                  ? 'Restore subscription access'
-                  : recovery
-                    ? 'Restore SDK authorization'
-                    : status?.sdk.ready
-                      ? 'SDK authorized'
-                      : 'Activate your SDK'}
-              </strong>
-              <p>
-                {accessNeedsRenewal
-                  ? 'Your existing SDK credentials are saved. Restore your licence coverage, then retry authorization.'
-                  : recovery && !credentialsNeedUpdating
-                    ? 'Your existing SDK credentials are saved. Resolve the authorization issue above, then retry.'
-                    : status?.sdk.ready
-                      ? 'Your SDK access is activated on this computer.'
-                      : 'Enter your Client key and Secret to activate the charts library on this computer.'}
-              </p>
-            </div>
-          </div>
-          {status?.sdk.ready && <p className="setup-success">SDK credentials saved · Activated</p>}
-        </>
-      )}
+  const credentialHelp = (
+    <>
       <p className="setup-credential-help">
         <a
           href="https://console.tradescript.dev/app/deployments/localhost"
@@ -151,74 +96,112 @@ export function ApplicationSetupContent({
       {credentialPageError && (
         <AppNotification message={credentialPageError} occurrence={credentialPageAttempt} />
       )}
-      {showCredentials && (
-        <form
-          onSubmit={(event) => {
-            event.preventDefault()
-            onActivate()
-          }}
-          className="connection-form setup-credentials"
-          aria-label={status?.sdk.configured ? 'Replace SDK credentials' : 'Activate SDK'}
+    </>
+  )
+  const clearButton = status?.sdk.configured && (
+    <button type="button" disabled={busy} onClick={onClearCredentials}>
+      Clear credentials
+    </button>
+  )
+  const credentialForm = showCredentials && (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault()
+        onActivate()
+      }}
+      className="connection-form setup-credentials"
+      aria-label={status?.sdk.configured ? 'Replace SDK credentials' : 'Activate SDK'}
+    >
+      {settingsMode && replacementRequested && <strong>Replace SDK credentials</strong>}
+      <label>
+        Client key
+        <input
+          autoComplete="off"
+          required
+          value={credentialId}
+          disabled={busy}
+          onChange={(event) => onCredentialId(event.target.value)}
+        />
+      </label>
+      <label>
+        Secret
+        <input
+          type="password"
+          autoComplete="off"
+          required
+          value={credentialSecret}
+          disabled={busy}
+          onChange={(event) => onCredentialSecret(event.target.value)}
+        />
+      </label>
+      <div className="setup-credential-actions">
+        <button
+          className="setup-primary"
+          type="submit"
+          disabled={busy || !credentialId.trim() || !credentialSecret.trim()}
         >
-          {replacementRequested && <strong>Replace SDK credentials</strong>}
-          <label>
-            Client key
-            <input
-              autoComplete="off"
-              required
-              value={credentialId}
-              disabled={busy}
-              onChange={(event) => onCredentialId(event.target.value)}
-            />
-          </label>
-          <label>
-            Secret
-            <input
-              type="password"
-              autoComplete="off"
-              required
-              value={credentialSecret}
-              disabled={busy}
-              onChange={(event) => onCredentialSecret(event.target.value)}
-            />
-          </label>
-          <div className="setup-credential-actions">
-            <button
-              className="setup-primary"
-              type="submit"
-              disabled={busy || !credentialId.trim() || !credentialSecret.trim()}
-            >
-              {busy
-                ? 'Activating…'
-                : status?.sdk.configured
-                  ? 'Update SDK credentials'
-                  : 'Activate SDK'}
+          {busy
+            ? 'Activating…'
+            : status?.sdk.configured
+              ? 'Update SDK credentials'
+              : 'Activate SDK'}
+        </button>
+        {replacementRequested && (
+          <button type="button" disabled={busy} onClick={onCancelReplacement}>
+            Cancel replacement
+          </button>
+        )}
+        {clearButton}
+      </div>
+    </form>
+  )
+  const privacy = (
+    <p className="setup-privacy">
+      Credentials stay on this computer and are sent to TradeScript only to activate and renew your
+      SDK licence.
+    </p>
+  )
+  const sessionActions = sessionExpired ? (
+    <button type="button" onClick={onReload}>
+      Reload workstation
+    </button>
+  ) : (
+    (!status || statusError) && (
+      <button type="button" onClick={onRefresh}>
+        Retry setup
+      </button>
+    )
+  )
+  const checking = (renewing || (recovery && !notice)) && (
+    <p role="status">Checking SDK authorization…</p>
+  )
+  const heading = (title: string, detail: string) => (
+    <div className="setup-heading">
+      <img className="brand-mark" src={APP_LOGO} alt="" />
+      <div>
+        <strong>{title}</strong>
+        <p>{detail}</p>
+      </div>
+    </div>
+  )
+
+  if (settingsMode)
+    return (
+      <div className="setup-content setup-settings">
+        {heading('TradeScript SDK', `SDK ${status?.sdk.version ?? '0.1.38'}`)}
+        {checking}
+        <section className="setup-settings-section" aria-label="SDK access">
+          {status?.sdk.ready && <p className="setup-success">SDK credentials saved · Activated</p>}
+          {!replacementRequested && (
+            <button type="button" disabled={busy} onClick={onReplace}>
+              Replace credentials
             </button>
-            {replacementRequested && (
-              <button type="button" disabled={busy} onClick={onCancelReplacement}>
-                Cancel replacement
-              </button>
-            )}
-          </div>
-        </form>
-      )}
-      {status?.sdk.configured && (
-        <button type="button" disabled={busy} onClick={onClearCredentials}>
-          Clear credentials
-        </button>
-      )}
-      <p className="setup-privacy">
-        Credentials stay on this computer and are sent to TradeScript only to activate and renew
-        your SDK licence.
-      </p>
-      {!settingsMode && status?.sdk.configured && !recovery && !replacementRequested && (
-        <button type="button" onClick={onReplace}>
-          Update SDK credentials
-        </button>
-      )}
-      {recovery && status?.connectionConfigured ? (
-        <p>Your broker connection settings and saved workspace are preserved.</p>
-      ) : settingsMode ? (
+          )}
+        </section>
+        {credentialHelp}
+        {credentialForm}
+        {!showCredentials && clearButton}
+        {privacy}
         <section
           className="setup-settings-section setup-saved-connection"
           aria-label="Saved connection"
@@ -229,32 +212,70 @@ export function ApplicationSetupContent({
           </div>
           <ConnectionSettingsButton />
         </section>
-      ) : (
-        <>
-          <div className="setup-step">
-            <span>02</span>
-            <div>
-              <strong>Connect your broker</strong>
-              <p>
-                Choose Paper or Live and TWS or IB Gateway, then connect. Advanced settings include
-                a custom port. Accounts are discovered from your broker.
-              </p>
-            </div>
-          </div>
-          {status?.sdk.configured && <ConnectionSettingsButton inline />}
-        </>
-      )}
-      {sessionExpired ? (
-        <button type="button" onClick={onReload}>
-          Reload workstation
-        </button>
-      ) : (
-        (!status || statusError) && (
-          <button type="button" onClick={onRefresh}>
-            Retry setup
+        {sessionActions}
+      </div>
+    )
+
+  const welcome = `Welcome to ${APP_NAME}`
+  const tagline = 'Your workstation. Your broker. Your AI provider.'
+  // Broker setup is its own screen once the SDK is active, so either can be fixed alone.
+  if (status?.sdk.ready && !status.connectionConfigured && !replacementRequested)
+    return (
+      <div className="setup-content">
+        {heading(welcome, tagline)}
+        <section className="setup-step" aria-label="Connect your broker">
+          <p className="setup-eyebrow">Step 2 of 2</p>
+          <strong>Connect your broker</strong>
+          <p>
+            Choose Paper or Live and TWS or IB Gateway, then connect. Advanced settings include a
+            custom port. Accounts are discovered from your broker.
+          </p>
+        </section>
+        <ConnectionSettingsButton inline />
+        <div className="setup-sdk-summary">
+          <p className="setup-success">SDK credentials saved · Activated</p>
+          <button type="button" disabled={busy} onClick={onReplace}>
+            Update SDK credentials
           </button>
-        )
+        </div>
+        {sessionActions}
+      </div>
+    )
+
+  const firstRun = !recovery && !status?.connectionConfigured && !status?.sdk.configured
+  return (
+    <div className="setup-content">
+      {heading(recovery ? 'Restore SDK access' : welcome, tagline)}
+      {checking}
+      <section className="setup-step" aria-label="SDK access">
+        {firstRun && <p className="setup-eyebrow">Step 1 of 2</p>}
+        <strong>
+          {accessNeedsRenewal
+            ? 'Restore subscription access'
+            : recovery
+              ? 'Restore SDK authorization'
+              : replacementRequested
+                ? 'Replace SDK credentials'
+                : 'Activate your SDK'}
+        </strong>
+        <p>
+          {accessNeedsRenewal
+            ? 'Your existing SDK credentials are saved. Restore your licence coverage, then retry authorization.'
+            : recovery && !credentialsNeedUpdating
+              ? 'Your existing SDK credentials are saved. Resolve the authorization issue above, then retry.'
+              : 'Enter your Client key and Secret to activate the charts library on this computer.'}
+        </p>
+      </section>
+      {credentialHelp}
+      {credentialForm}
+      {!showCredentials && clearButton}
+      {privacy}
+      {recovery && status?.connectionConfigured && (
+        <p className="setup-preserved">
+          Your broker connection settings and saved workspace are preserved.
+        </p>
       )}
+      {sessionActions}
     </div>
   )
 }

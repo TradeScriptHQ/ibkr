@@ -58,11 +58,12 @@ describe('application setup presentation', () => {
     expect(html).not.toMatch(/Welcome|Restore/u)
   })
 
-  it('preserves first-run activation and connection steps', () => {
+  it('shows only SDK activation as the first of two separate setup screens', () => {
     const html = content({ sdk: { configured: false, ready: false }, connectionConfigured: false })
     expect(html).toContain('Welcome to IBKR Tradescript Terminal')
+    expect(html).toContain('Step 1 of 2')
     expect(html).toContain('Activate your SDK')
-    expect(html).toContain('Connect your broker')
+    expect(html).not.toContain('Connect your broker')
     expect(html).toContain(
       'Enter your Client key and Secret to activate the charts library on this computer.',
     )
@@ -77,13 +78,24 @@ describe('application setup presentation', () => {
     ])
   })
 
-  it('keeps successful SDK activation visible while broker setup remains incomplete', () => {
+  it('shows broker setup on its own screen once the SDK is active', () => {
     const html = content({ ...ready, connectionConfigured: false })
     expect(html).toContain('Welcome to IBKR Tradescript Terminal')
-    expect(html).toContain('SDK authorized')
-    expect(html).toContain('SDK credentials saved · Activated')
+    expect(html).toContain('Step 2 of 2')
     expect(html).toContain('Connect your broker')
-    expect(html).not.toMatch(/Restore|<input/u)
+    expect(html).toContain('SDK credentials saved · Activated')
+    expect(html).toContain('Update SDK credentials')
+    expect(html).not.toMatch(/Restore|<input|Get credentials|Client key/u)
+  })
+
+  it('keeps SDK recovery free of broker setup', () => {
+    const html = content({
+      sdk: { configured: true, ready: false, failure: 'rejected', failureReason: 'unauthorized' },
+      connectionConfigured: false,
+    })
+    expect(html).toContain('Restore SDK access')
+    expect(html).toContain('Client key')
+    expect(html).not.toMatch(/Connect your broker|Step \d of 2/u)
   })
 
   it('opens replacement fields during rejected-credential recovery and preserves saved workspace', () => {

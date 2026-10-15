@@ -191,7 +191,7 @@ export function ConnectionSettingsButton({ inline = false }: { inline?: boolean 
         <span>Trading mode</span>
         <StandardSelect
           ariaLabel="Trading mode"
-          size="sm"
+          size={inline ? 'md' : 'sm'}
           value={settings.active}
           disabled={busy}
           options={[
@@ -209,7 +209,7 @@ export function ConnectionSettingsButton({ inline = false }: { inline?: boolean 
         <span>Connection</span>
         <StandardSelect
           ariaLabel="Connection type"
-          size="sm"
+          size={inline ? 'md' : 'sm'}
           value={profile.connectionType}
           disabled={busy}
           options={[
